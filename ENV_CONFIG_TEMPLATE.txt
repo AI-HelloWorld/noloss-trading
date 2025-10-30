@@ -1,0 +1,39 @@
+# AI Trading System - Environment Configuration Template
+# Copy this content to .env file and fill in your actual API keys
+
+# ========================================
+# AI Model API Keys
+# ========================================
+
+# DeepSeek API (用于技术分析、基本面分析、风险管理、投资组合管理)
+# 获取地址: https://platform.deepseek.com/api_keys
+DEEPSEEK_API_KEY=sk-your-deepseek-api-key-here
+
+# Grok API (用于新闻分析、情绪分析)
+# 获取地址: https://console.x.ai/
+GROK_API_KEY=xai-your-grok-api-key-here
+
+# 千问3 API (用于技术分析验证)
+# 获取地址: https://dashscope.console.aliyun.com/
+QWEN_API_KEY=sk-your-qwen-api-key-here
+
+# ========================================
+# Exchange API Keys
+# ========================================
+
+# AsterDEX Exchange API
+ASTER_DEX_API_KEY=your-aster-dex-api-key-here
+ASTER_DEX_API_SECRET=your-aster-dex-api-secret-here
+
+# ========================================
+# Trading Configuration
+# ========================================
+
+INITIAL_BALANCE=10000.0
+MAX_POSITION_SIZE=0.1
+RISK_PER_TRADE=0.02
+ENABLE_AUTO_TRADING=true
+CONFIDENCE_THRESHOLD=0.65
+RISK_THRESHOLD=0.7
+MAX_CONCURRENT_TRADES=3
+
