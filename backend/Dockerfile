@@ -10,11 +10,12 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 安装系统依赖
+# 安装系统依赖（包括bash）
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     git \
+    bash \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制requirements文件
@@ -23,12 +24,16 @@ COPY requirements.txt .
 # 安装Python依赖
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 复制Docker入口脚本（先复制并设置权限）
+COPY backend/docker-entrypoint.sh /docker-entrypoint.sh
+# 移除可能的Windows行结束符并设置执行权限
+RUN sed -i 's/\r$//' /docker-entrypoint.sh && \
+    chmod +x /docker-entrypoint.sh && \
+    test -f /docker-entrypoint.sh && \
+    echo "✅ 入口脚本已准备好"
+
 # 复制后端代码
 COPY backend/ ./backend/
-
-# 复制Docker入口脚本
-COPY backend/docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
 
 # 创建日志目录和数据库目录
 RUN mkdir -p logs && \
