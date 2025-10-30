@@ -17,7 +17,7 @@ class NewsAnalyst(BaseAgent):
     
     def __init__(self, ai_model: str, api_key: str):
         super().__init__(AgentRole.NEWS_ANALYST, ai_model, api_key)
-        self.api_url = "https://api.x.ai/v1/chat/completions"
+        self.api_url = "https://api.deepseek.com/v1/chat/completions"
         self.tracked_celebrities = ["Donald Trump", "Elon Musk", "CZ", "赵长鹏", "@elonmusk", "@cz_binance"]
         self.news_api_url = settings.news_api_url
     
@@ -87,7 +87,7 @@ class NewsAnalyst(BaseAgent):
                 }
                 
                 payload = {
-                    "model": "grok-beta",
+                    "model": "deepseek-chat",
                     "messages": [
                         {"role": "system", "content": f"你是一个专业的{self.name}，擅长解读新闻、宏观事件和社交动态对市场的影响。"},
                         {"role": "user", "content": prompt}
