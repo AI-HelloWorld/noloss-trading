@@ -13,7 +13,7 @@ fi
 # 检查docker-compose是否安装
 if ! command -v docker-compose &> /dev/null; then
     echo "❌ 错误: docker-compose未安装"
-    echo "请先安装docker-compose: https://docs.docker.com/compose/install/"
+    echo "请先安装docker-compose: https://github.com/docker/compose/releases/"
     exit 1
 fi
 
