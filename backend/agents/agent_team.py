@@ -8,13 +8,14 @@ from loguru import logger
 from backend.agents.fundamental_analyst import FundamentalAnalyst
 from backend.agents.sentiment_analyst import SentimentAnalyst
 from backend.agents.news_analyst import NewsAnalyst
-from backend.agents.technical_analyst import TechnicalAnalyst
+from backend.agents.technical_analyst_new import OptimizedTradingStrategy
 from backend.agents.risk_manager import RiskManager
 from backend.agents.portfolio_manager import PortfolioManager
 from backend.agents.base_agent import AgentAnalysis, AgentRole
 from backend.agents.kline_compressor import kline_compressor
 from backend.agents.stop_loss_decision_system import stop_decision_system
 from backend.config import settings
+
 
 
 class AgentTeam:
@@ -35,7 +36,7 @@ class AgentTeam:
     - DeepSeek: 基本面、风险管理、投资组合、技术分析（专业金融分析）
     - 千问3: 技术分析（双重验证机制）
     """
-    
+    last_new_id = 0
     def __init__(self):
         self.agents = {}
         self._initialize_team()
@@ -45,25 +46,25 @@ class AgentTeam:
         # 技术分析师 - DeepSeek + 千问3 (双引擎)
         try:
             if settings.deepseek_api_key:
-                self.agents['technical_deepseek'] = TechnicalAnalyst("DeepSeek", settings.deepseek_api_key)
+                self.agents['technical_deepseek'] = OptimizedTradingStrategy("DeepSeek", settings.deepseek_api_key)
                 logger.info("✅ 技术分析师(DeepSeek)已就位")
         except Exception as e:
             logger.warning(f"技术分析师(DeepSeek)初始化失败: {e}")
         
-        try:
-            if settings.qwen_api_key:
-                self.agents['technical_qwen'] = TechnicalAnalyst("Qwen", settings.qwen_api_key)
-                logger.info("✅ 技术分析师(千问3)已就位")
-        except Exception as e:
-            logger.warning(f"技术分析师(千问3)初始化失败: {e}")
+        # try:
+        #     if settings.qwen_api_key:
+        #         self.agents['technical_qwen'] = EnhancedTradingStrategy("Qwen", settings.qwen_api_key)
+        #         logger.info("✅ 技术分析师(千问3)已就位")
+        # except Exception as e:
+        #     logger.warning(f"技术分析师(千问3)初始化失败: {e}")
         
         # 情绪分析师 - DeepSeek (改用DeepSeek API)
-        try:
-            if settings.deepseek_api_key:
-                self.agents['sentiment'] = SentimentAnalyst("DeepSeek", settings.deepseek_api_key)
-                logger.info("✅ 情绪分析师已就位 (DeepSeek)")
-        except Exception as e:
-            logger.warning(f"情绪分析师初始化失败: {e}")
+        # try:
+        #     if settings.deepseek_api_key:
+        #         self.agents['sentiment'] = SentimentAnalyst("DeepSeek", settings.deepseek_api_key)
+        #         logger.info("✅ 情绪分析师已就位 (DeepSeek)")
+        # except Exception as e:
+        #     logger.warning(f"情绪分析师初始化失败: {e}")
         
         # 新闻分析师 - DeepSeek (改用DeepSeek API)
         try:
@@ -74,20 +75,20 @@ class AgentTeam:
             logger.warning(f"新闻分析师初始化失败: {e}")
         
         # 基本面分析师 - DeepSeek
-        try:
-            if settings.deepseek_api_key:
-                self.agents['fundamental'] = FundamentalAnalyst("DeepSeek", settings.deepseek_api_key)
-                logger.info("✅ 基本面分析师已就位 (DeepSeek)")
-        except Exception as e:
-            logger.warning(f"基本面分析师初始化失败: {e}")
+        # try:
+        #     if settings.deepseek_api_key:
+        #         self.agents['fundamental'] = FundamentalAnalyst("DeepSeek", settings.deepseek_api_key)
+        #         logger.info("✅ 基本面分析师已就位 (DeepSeek)")
+        # except Exception as e:
+        #     logger.warning(f"基本面分析师初始化失败: {e}")
         
         # 风险管理经理 - DeepSeek
-        try:
-            if settings.deepseek_api_key:
-                self.agents['risk'] = RiskManager("DeepSeek", settings.deepseek_api_key)
-                logger.info("✅ 风险管理经理已就位 (DeepSeek)")
-        except Exception as e:
-            logger.warning(f"风险管理经理初始化失败: {e}")
+        # try:
+        #     if settings.deepseek_api_key:
+        #         self.agents['risk'] = RiskManager("DeepSeek", settings.deepseek_api_key)
+        #         logger.info("✅ 风险管理经理已就位 (DeepSeek)")
+        # except Exception as e:
+        #     logger.warning(f"风险管理经理初始化失败: {e}")
         
         # 投资组合经理 - DeepSeek
         try:
@@ -112,7 +113,8 @@ class AgentTeam:
         market_data: Dict,
         portfolio: Dict,
         positions: List[Dict],
-        additional_data: Optional[Dict] = None
+        additional_data: Optional[Dict] = None,
+        db_session = None  # 添加数据库会话参数
     ) -> Dict:
         """
         进行团队协同分析（集成K线数据）
@@ -125,7 +127,7 @@ class AgentTeam:
         5. 返回最终决策和完整分析报告
         """
         if not self.agents:
-            logger.error("分析师团队未初始化")
+            logger.exception("分析师团队未初始化")
             return self._empty_decision("分析师团队未初始化")
         
         try:
@@ -149,13 +151,27 @@ class AgentTeam:
                 additional_data['kline_compressed'] = compressed_kline_data
                 additional_data['kline_interval'] = kline_interval
                 
+                # 输出格式化的摘要
+                if 'formatted_summary' in compressed_kline_data:
+                    logger.info(f"\n{'='*60}\n{compressed_kline_data['formatted_summary']}\n{'='*60}")
+                
                 logger.info(f"✅ K线数据压缩完成，提取{len(compressed_kline_data)}维特征")
             else:
                 logger.warning(f"⚠️ 未提供K线数据，将使用简化分析")
             
             additional_data['portfolio'] = portfolio
             additional_data['positions'] = positions
-            
+            if settings.news_api_url:
+                news_data = await self.agents['news']._fetch_news_from_api()
+                news_data.sort(key=lambda x: x.get('id'), reverse=False)
+                temp_arr = []
+                for new in news_data:
+                    if new.get("id") > self.last_new_id:
+                        temp_arr.append(new)
+                        self.last_new_id = new.get("id")
+                if not temp_arr:
+                    news_data = []
+                additional_data['news'] = temp_arr
             # 第一阶段：并行执行各分析师的分析
             analysis_tasks = []
             
@@ -172,16 +188,16 @@ class AgentTeam:
             #     )
             
             # # 情绪分析师 - Grok
-            if 'sentiment' in self.agents:
-                analysis_tasks.append(
-                    self.agents['sentiment'].analyze(symbol, market_data, additional_data)
-                )
+            # if 'sentiment' in self.agents:
+            #     analysis_tasks.append(
+            #         self.agents['sentiment'].analyze(symbol, market_data, additional_data)
+            #     )
             
-            # 基本面分析师 - DeepSeek
-            if 'fundamental' in self.agents:
-                analysis_tasks.append(
-                    self.agents['fundamental'].analyze(symbol, market_data, additional_data)
-                )
+            # # 基本面分析师 - DeepSeek
+            # if 'fundamental' in self.agents:
+            #     analysis_tasks.append(
+            #         self.agents['fundamental'].analyze(symbol, market_data, additional_data)
+            #     )
             if settings.news_api_url:
                 if 'news' in self.agents:
                     analysis_tasks.append(
@@ -201,19 +217,19 @@ class AgentTeam:
             ]
             
             if not valid_analyses:
-                logger.error("所有分析师分析失败")
+                logger.exception("所有分析师分析失败")
                 return self._empty_decision("所有分析师分析失败")
             
             logger.info(f"✅ {len(valid_analyses)}/{len(analysis_tasks)} 位分析师完成分析")
-            
+            additional_data['team_analyses'] = valid_analyses
             # 第二阶段：风险管理评估
-            if 'risk' in self.agents:
-                risk_analysis = await self.agents['risk'].analyze(
-                    symbol, market_data, additional_data
-                )
-                if isinstance(risk_analysis, AgentAnalysis):
-                    valid_analyses.append(risk_analysis)
-                    logger.info(f"✅ 风险管理经理完成评估 - 风险评分: {risk_analysis.risk_score:.2f}")
+            # if 'risk' in self.agents:
+            #     risk_analysis = await self.agents['risk'].analyze(
+            #         symbol, market_data, additional_data
+            #     )
+            #     if isinstance(risk_analysis, AgentAnalysis):
+            #         valid_analyses.append(risk_analysis)
+            #         logger.info(f"✅ 风险管理经理完成评估 - 风险评分: {risk_analysis.risk_score:.2f}")
             
             # 第三阶段：投资组合经理做出最终决策
             if 'portfolio' in self.agents:
@@ -224,7 +240,7 @@ class AgentTeam:
                 }
                 
                 final_decision = await self.agents['portfolio'].make_final_decision(
-                    symbol, market_data, valid_analyses, portfolio_with_positions
+                    symbol, market_data, valid_analyses, portfolio_with_positions, db_session
                 )
                 
                 # 根据决策结果提供更详细的日志
@@ -247,12 +263,12 @@ class AgentTeam:
                     logger.info(f"❌ 拒绝 {symbol} {action} (置信度: {confidence:.2f})")
                 
                 return final_decision
-            else:
-                # 如果没有投资组合经理，使用简单的共识机制
-                return self._fallback_consensus(valid_analyses)
+            # else:
+            #     # 如果没有投资组合经理，使用简单的共识机制
+            #     return self._fallback_consensus(valid_analyses)
         
         except Exception as e:
-            logger.error(f"团队分析失败: {e}")
+            logger.exception(f"团队分析失败: {e}")
             return self._empty_decision(f"团队分析异常: {str(e)}")
     
     def _fallback_consensus(self, analyses: List[AgentAnalysis]) -> Dict:
@@ -338,7 +354,7 @@ class AgentTeam:
             止盈止损决策结果
         """
         if not self.agents:
-            logger.error("分析师团队未初始化")
+            logger.exception("分析师团队未初始化")
             return {'final_decision': 'hold', 'action': 'hold', 'reasoning': '团队未初始化'}
         
         try:
@@ -349,7 +365,7 @@ class AgentTeam:
                 'position_info': position_info,
                 'portfolio': position_info.get('portfolio', {})
             }
-            
+            logger.info(f"准备分析数据: {additional_data}")
             # 第一阶段：并行执行各分析师的分析
             analysis_tasks = []
             
@@ -358,10 +374,10 @@ class AgentTeam:
                 analysis_tasks.append(
                     self.agents['technical_deepseek'].analyze(symbol, market_data, additional_data)
                 )
-            if 'technical_qwen' in self.agents:
-                analysis_tasks.append(
-                    self.agents['technical_qwen'].analyze(symbol, market_data, additional_data)
-                )
+            # if 'technical_qwen' in self.agents:
+            #     analysis_tasks.append(
+            #         self.agents['technical_qwen'].analyze(symbol, market_data, additional_data)
+            #     )
             
             # 情绪分析师
             if 'sentiment' in self.agents:
@@ -400,7 +416,7 @@ class AgentTeam:
             ]
             
             if not valid_analyses:
-                logger.error("所有分析师分析失败")
+                logger.exception("所有分析师分析失败")
                 return {'final_decision': 'hold', 'action': 'hold', 'reasoning': '分析失败'}
             
             logger.info(f"✅ {len(valid_analyses)}/{len(analysis_tasks)} 位分析师完成止盈止损评估")
@@ -410,9 +426,10 @@ class AgentTeam:
                 position_id, valid_analyses, market_data
             )
             
-            # 第三阶段：投资组合经理做出最终决策
-            final_decision = stop_decision_system.make_stop_decision(
-                position_id, stop_opinions, market_data
+            # 第三阶段：投资组合经理做出最终决策（调用大模型）
+            portfolio_manager = self.agents.get(AgentRole.PORTFOLIO_MANAGER)
+            final_decision = await stop_decision_system.make_stop_decision(
+                position_id, stop_opinions, market_data, portfolio_manager
             )
             
             logger.info(
@@ -424,7 +441,7 @@ class AgentTeam:
             return final_decision
         
         except Exception as e:
-            logger.error(f"团队止盈止损评估失败: {e}")
+            logger.exception(f"团队止盈止损评估失败: {e}")
             return {'final_decision': 'hold', 'action': 'hold', 'reasoning': f'评估异常: {str(e)}'}
     
     def get_team_status(self) -> Dict:
@@ -445,4 +462,4 @@ class AgentTeam:
 
 # 全局智能体团队实例
 agent_team = AgentTeam()
-
+agent_team_position = AgentTeam()

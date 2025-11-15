@@ -3,28 +3,52 @@ import { Activity, Bot, TrendingUp, Zap } from 'lucide-react'
 import { useLanguage } from '../locales'
 import LanguageSwitcher from './LanguageSwitcher'
 
+// X (Twitter) 图标组件
+const XIcon = ({ className }) => (
+  <svg
+    viewBox="0 0 24 24"
+    className={className}
+    fill="currentColor"
+    xmlns="http://www.w3.org/2000/svg"
+  >
+    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.251L5.25 4.126H3.927z"/>
+  </svg>
+)
+
 const Header = ({ status }) => {
   const { t } = useLanguage()
   return (
-    <header className="sticky top-0 z-50 bg-gradient-to-b from-dark-50/98 via-dark-50/95 to-dark-50/98 backdrop-blur-xl border-b border-gold-400/10 shadow-lg shadow-black/20">
+    <header className="sticky top-0 z-50 bg-gradient-to-b from-dark-50/98 via-dark-50/95 to-dark-50/98 backdrop-blur-xl border-b-2 border-gold-400/20 shadow-xl shadow-black/30">
       <div className="container mx-auto px-6 py-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-4">
             <div className="relative">
-              <div className="absolute inset-0 bg-gold-400 blur-2xl opacity-20 animate-pulse"></div>
-              <Zap className="w-10 h-10 text-gold-400 relative z-10" strokeWidth={2.5} />
+              <div className="absolute inset-0 bg-gold-400 blur-2xl opacity-25 animate-pulse"></div>
+              <div className="absolute inset-0 bg-gradient-to-r from-gold-400/20 to-gold-500/20 rounded-lg"></div>
+              <Zap className="w-10 h-10 text-gold-400 relative z-10 drop-shadow-[0_0_8px_rgba(252,213,53,0.5)]" strokeWidth={2.5} />
             </div>
             <div>
-              <h1 className="text-3xl font-bold gold-text tracking-tight">
+              <h1 className="text-3xl font-bold gold-text tracking-tight drop-shadow-lg">
                 NoLoss7.com
               </h1>
-              <p className="text-gold-400/70 text-xs font-medium mt-0.5 tracking-wide">
+              <p className="text-gold-500/80 text-xs font-semibold mt-0.5 tracking-wide uppercase">
                 {t('dashboard.subtitle')}
               </p>
             </div>
           </div>
           
           <div className="flex items-center space-x-4">
+            {/* X (Twitter) 链接 */}
+            <a
+              href="https://x.com/Qubyt_E3A"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="glass-card px-3 py-1.5 rounded-lg hover:border-gold-400/30 transition-all duration-300 group"
+              title="关注我们的X账号"
+            >
+              <XIcon className="w-5 h-5 text-gray-400 group-hover:text-gold-400 transition-colors" />
+            </a>
+
             {/* 语言切换 */}
             <LanguageSwitcher />
 

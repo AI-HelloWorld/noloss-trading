@@ -340,7 +340,6 @@ MIT License
 如有问题或建议，请通过以下方式联系：
 - GitHub Issues
 - Email: eternalaie3a@gmail.com
-- X:https://x.com/Qubyt_E3A
 
 ## 🙏 致谢
 

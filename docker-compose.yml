@@ -16,9 +16,6 @@ services:
       - ./.env:/app/.env
     environment:
       - PYTHONUNBUFFERED=1
-      # 可以在这里覆盖环境变量，或使用.env文件
-      - INITIAL_BALANCE=1000.0
-      - ENABLE_AUTO_TRADING=true
       - DEBUG_MODE=false
     networks:
       - ai-trading-network

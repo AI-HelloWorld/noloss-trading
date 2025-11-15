@@ -90,7 +90,7 @@ class IntelligentStopStrategy:
         
         # 使用更优的止损位（基础止损或支撑位下方）
         if support_level and support_level > base_stop_loss:
-            stop_loss = support_level * 0.99  # 在支撑位下方1%
+            stop_loss = support_level * 0.9  # 在支撑位下方1%
             strategy_type = StopStrategyType.SUPPORT_RESISTANCE
         else:
             stop_loss = base_stop_loss
@@ -98,7 +98,7 @@ class IntelligentStopStrategy:
         
         # 使用更优的止盈位（基础止盈或阻力位）
         if resistance_level and resistance_level < base_take_profit:
-            take_profit = resistance_level * 0.99  # 在阻力位下方1%
+            take_profit = resistance_level * 0.9  # 在阻力位下方1%
         else:
             take_profit = base_take_profit
         

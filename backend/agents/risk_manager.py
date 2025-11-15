@@ -60,7 +60,19 @@ class RiskManager(BaseAgent):
             
             # 获取团队分析结果（如果有的话）
             team_analyses = additional_data.get('team_analyses', []) if additional_data else []
-            
+            muti_agent_analysis_context = ""
+            for analysis in team_analyses:
+                # 拼接分析结果到字符串
+                muti_agent_analysis_context += f"""角色 {self._get_target_role_name(analysis.agent_role)} 建议: {analysis.recommendation} 置信度: {analysis.confidence}\n"""
+                muti_agent_analysis_context += f"""理由：{analysis.reasoning}\n"""
+                muti_agent_analysis_context += f"""技术指标：{analysis.key_metrics}\n"""
+                muti_agent_analysis_context += f"""风险评分: {analysis.risk_score}\n"""
+                muti_agent_analysis_context += f"""优先级: {analysis.priority}\n"""
+                muti_agent_analysis_context += f"""置信度: {analysis.confidence}\n"""
+            # for position in positions:
+            #     if position.get('symbol') == symbol:
+            #         position_info = position
+            #         break
             # 构建分析上下文（注入风控配置）
             analysis_context = f"""
 {get_risk_control_context()}
@@ -68,24 +80,27 @@ class RiskManager(BaseAgent):
 当前交易对：{symbol}
 市场数据：{json.dumps(market_data, ensure_ascii=False, indent=2)}
 
+持仓数据：
+{json.dumps(positions, ensure_ascii=False, indent=2) if positions else "无持仓数据"}
+
 风险评估指标：
 {json.dumps(risk_metrics, ensure_ascii=False, indent=2)}
 
-投资组合状态：
+账号投资组合状态：
 - 总资产: ${portfolio.get('total_balance', 0):,.2f}
 - 现金余额: ${portfolio.get('cash_balance', 0):,.2f}
 - 持仓价值: ${portfolio.get('positions_value', 0):,.2f}
 - 总盈亏: ${portfolio.get('total_pnl', 0):,.2f}
 
 团队分析建议：
-{json.dumps(team_analyses, ensure_ascii=False, indent=2)}
+{muti_agent_analysis_context}
 
 请基于以上数据进行全面风险评估，判断是否批准当前交易建议。
 特别注意：严格检查是否违反系统风控规则！
 """
             
             prompt = analysis_context
-            
+            logger.info(f"风险管理分析提示词:{RISK_MANAGER_PROMPT}\n {prompt}")
             # 使用DeepSeek API
             async with aiohttp.ClientSession() as session:
                 headers = {
@@ -99,7 +114,7 @@ class RiskManager(BaseAgent):
                         {"role": "system", "content": RISK_MANAGER_PROMPT},
                         {"role": "user", "content": prompt}
                     ],
-                    "temperature": 0.6,
+                    "temperature": 0.1,
                     "max_tokens": 1000
                 }
                 
@@ -165,10 +180,10 @@ class RiskManager(BaseAgent):
                 volatility = volatility_indicators['atr_pct']
                 volatility_source = "K线ATR"
             else:
-                volatility = ((high - low) / price) * 100 if price > 0 else 0
+                volatility = ((high - low) / ((high - low)/2)) * 100 if price > 0 else 0
                 volatility_source = "24小时"
         else:
-            volatility = ((high - low) / price) * 100 if price > 0 else 0
+            volatility = ((high - low) /  ((high - low)/2)) * 100 if price > 0 else 0
             volatility_source = "24小时"
         
         # 计算持仓比例
@@ -248,23 +263,40 @@ class RiskManager(BaseAgent):
             return 0.2  # 中性市场
     
     def _assess_market_regime_risk(self, market_data: Dict) -> str:
-        """评估市场环境风险"""
+        """改进的市场环境识别"""
         change = market_data.get('change_24h', 0)
-        volatility = ((market_data.get('high_24h', 0) - market_data.get('low_24h', 0)) / 
-                     market_data.get('price', 1)) * 100
+        high = market_data.get('high_24h', 0)
+        low = market_data.get('low_24h', 0)
+        avg_price = (high + low) / 2
         
-        if volatility > 15:
-            return "极端波动"
-        elif volatility > 10:
-            return "高波动"
-        elif change > 10:
-            return "强势上涨"
-        elif change < -10:
-            return "强势下跌"
-        elif abs(change) < 2:
-            return "横盘整理"
+        # 改进的波动率计算
+        volatility = ((high - low) / avg_price) * 100 if avg_price > 0 else 0
+        
+        # 波动率分类
+        if volatility > 20:
+            vol_regime = "极端波动"
+        elif volatility > 12:
+            vol_regime = "高波动"
+        elif volatility > 5:
+            vol_regime = "中等波动"
         else:
-            return "正常波动"
+            vol_regime = "低波动"
+        
+        # 趋势分类
+        if change > 15:
+            trend_regime = "强势上涨"
+        elif change > 5:
+            trend_regime = "温和上涨"
+        elif change < -15:
+            trend_regime = "强势下跌"
+        elif change < -5:
+            trend_regime = "温和下跌"
+        elif abs(change) < 2:
+            trend_regime = "横盘"
+        else:
+            trend_regime = "小幅震荡"
+        
+        return f"{vol_regime}-{trend_regime}"
     
     def _calculate_liquidation_risk(self, positions: List[Dict], market_data: Dict) -> str:
         """计算清算风险"""

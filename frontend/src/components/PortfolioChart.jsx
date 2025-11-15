@@ -32,8 +32,8 @@ const PortfolioChart = ({ data }) => {
         <AreaChart data={chartData}>
           <defs>
             <linearGradient id="colorBalance" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#fbbf24" stopOpacity={0.6}/>
-              <stop offset="95%" stopColor="#fbbf24" stopOpacity={0.05}/>
+              <stop offset="5%" stopColor="#fcd535" stopOpacity={0.7}/>
+              <stop offset="95%" stopColor="#fcd535" stopOpacity={0.05}/>
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke="#3f3f46" opacity={0.2} />
@@ -65,14 +65,15 @@ const PortfolioChart = ({ data }) => {
           />
           <Tooltip 
             contentStyle={{ 
-              backgroundColor: '#18181b', 
-              border: '1px solid rgba(251, 191, 36, 0.3)',
-              borderRadius: '8px',
-              padding: '10px',
-              color: '#ffffff',
-              fontWeight: '500'
+              backgroundColor: '#1e2329', 
+              border: '1px solid rgba(252, 213, 53, 0.4)',
+              borderRadius: '10px',
+              padding: '12px',
+              color: '#eaecef',
+              fontWeight: '500',
+              boxShadow: '0 8px 24px rgba(0, 0, 0, 0.5)'
             }}
-            labelStyle={{ color: '#fbbf24', fontWeight: '600', marginBottom: '6px', fontSize: '12px' }}
+            labelStyle={{ color: '#fcd535', fontWeight: '600', marginBottom: '6px', fontSize: '12px' }}
             itemStyle={{ color: '#ffffff', fontWeight: '500', fontSize: '13px' }}
             formatter={(value) => {
               const diff = value - INITIAL_CAPITAL
@@ -87,12 +88,12 @@ const PortfolioChart = ({ data }) => {
           <Area 
             type="monotone" 
             dataKey="钱包余额" 
-            stroke="#fbbf24" 
+            stroke="#fcd535" 
             fillOpacity={1}
             fill="url(#colorBalance)"
-            strokeWidth={2.5}
+            strokeWidth={3}
             dot={false}
-            activeDot={{ r: 4, fill: '#fbbf24', strokeWidth: 2, stroke: '#0a0a0a' }}
+            activeDot={{ r: 5, fill: '#fcd535', strokeWidth: 2, stroke: '#1e2329' }}
           />
         </AreaChart>
       </ResponsiveContainer>

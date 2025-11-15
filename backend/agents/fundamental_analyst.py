@@ -42,22 +42,22 @@ class FundamentalAnalyst(BaseAgent):
     ) -> AgentAnalysis:
         """分析代币基本面"""
         try:
+            kline_compressed = additional_data.get('kline_compressed', {}) if additional_data else {}
             # 获取链上数据和项目信息（这里可以集成真实的链上API）
             onchain_data = additional_data.get('onchain', {}) if additional_data else {}
             project_info = additional_data.get('project', {}) if additional_data else {}
             
             # 新增：基本面评分系统
-            fundamental_score = self._calculate_fundamental_score(project_info, onchain_data)
+            # fundamental_score = self._calculate_fundamental_score(project_info, onchain_data)
             
             # 新增：估值评估
-            valuation_assessment = self._assess_valuation(project_info, market_data)
+            # valuation_assessment = self._assess_valuation(project_info, market_data)
             
             # 构建分析上下文（注入风控配置）
             analysis_context = f"""
-{get_risk_control_context()}
 
 当前交易对：{symbol}
-市场数据：{json.dumps(market_data, ensure_ascii=False, indent=2)}
+市场数据：{json.dumps(kline_compressed, ensure_ascii=False, indent=2)}
 
 链上数据：
 {json.dumps(onchain_data, ensure_ascii=False, indent=2)}
@@ -65,11 +65,9 @@ class FundamentalAnalyst(BaseAgent):
 项目信息：
 {json.dumps(project_info, ensure_ascii=False, indent=2)}
 
-基本面综合评分: {fundamental_score}/100
-估值评估: {valuation_assessment}
 
 做空信号触发条件：
-- 基本面评分 < 40分
+- 基本面评分 < 35分
 - 项目估值明显高估
 - 关键指标持续恶化
 - 团队或生态出现重大问题
@@ -79,7 +77,7 @@ class FundamentalAnalyst(BaseAgent):
 """
             
             prompt = analysis_context
-            
+            logger.info(f"基本面分析提示词: {prompt}")
             # 使用DeepSeek API
             async with aiohttp.ClientSession() as session:
                 headers = {
@@ -93,7 +91,7 @@ class FundamentalAnalyst(BaseAgent):
                         {"role": "system", "content": FUNDAMENTAL_ANALYST_PROMPT},
                         {"role": "user", "content": prompt}
                     ],
-                    "temperature": 0.7,
+                    "temperature": 0.2,
                     "max_tokens": 1000
                 }
                 
@@ -135,84 +133,84 @@ class FundamentalAnalyst(BaseAgent):
                 priority=3
             )
     
-    def _calculate_fundamental_score(self, project_info: Dict, onchain_data: Dict) -> float:
-        """计算项目基本面评分(0-100)"""
-        score = 50  # 基础分
+    # def _calculate_fundamental_score(self, project_info: Dict, onchain_data: Dict) -> float:
+    #     """计算项目基本面评分(0-100)"""
+    #     score = 50  # 基础分
         
-        # 1. 团队实力 (默认中等)
-        team_strength = project_info.get('team_strength', 0.5)
-        score += (team_strength - 0.5) * 20
+    #     # 1. 团队实力 (默认中等)
+    #     team_strength = project_info.get('team_strength', 0.5)
+    #     score += (team_strength - 0.5) * 20
         
-        # 2. 生态发展
-        ecosystem_health = onchain_data.get('ecosystem_health', 0.5)
-        score += (ecosystem_health - 0.5) * 15
+    #     # 2. 生态发展
+    #     ecosystem_health = onchain_data.get('ecosystem_health', 0.5)
+    #     score += (ecosystem_health - 0.5) * 15
         
-        # 3. 代币经济
-        tokenomics_score = project_info.get('tokenomics_score', 0.5)
-        score += (tokenomics_score - 0.5) * 15
+    #     # 3. 代币经济
+    #     tokenomics_score = project_info.get('tokenomics_score', 0.5)
+    #     score += (tokenomics_score - 0.5) * 15
         
-        # 4. 竞争优势
-        competitive_advantage = project_info.get('competitive_advantage', 0.5)
-        score += (competitive_advantage - 0.5) * 10
+    #     # 4. 竞争优势
+    #     competitive_advantage = project_info.get('competitive_advantage', 0.5)
+    #     score += (competitive_advantage - 0.5) * 10
         
-        # 5. 链上活跃度
-        active_users = onchain_data.get('active_users', 0)
-        if active_users > 10000:
-            score += 10
-        elif active_users > 1000:
-            score += 5
+    #     # 5. 链上活跃度
+    #     active_users = onchain_data.get('active_users', 0)
+    #     if active_users > 10000:
+    #         score += 10
+    #     elif active_users > 1000:
+    #         score += 5
         
-        # 6. 风险因素（负分）
-        risk_factors = project_info.get('risk_factors', [])
-        score -= len(risk_factors) * 5
+    #     # 6. 风险因素（负分）
+    #     risk_factors = project_info.get('risk_factors', [])
+    #     score -= len(risk_factors) * 5
         
-        # 7. 技术创新
-        tech_innovation = project_info.get('tech_innovation', 0.5)
-        score += (tech_innovation - 0.5) * 10
+    #     # 7. 技术创新
+    #     tech_innovation = project_info.get('tech_innovation', 0.5)
+    #     score += (tech_innovation - 0.5) * 10
         
-        return max(0, min(100, round(score, 2)))
+    #     return max(0, min(100, round(score, 2)))
     
-    def _assess_valuation(self, project_info: Dict, market_data: Dict) -> str:
-        """评估估值水平"""
-        market_cap = market_data.get('market_cap', 0)
-        price = market_data.get('price', 0)
+    # def _assess_valuation(self, project_info: Dict, market_data: Dict) -> str:
+    #     """评估估值水平"""
+    #     market_cap = market_data.get('market_cap', 0)
+    #     price = market_data.get('price', 0)
         
-        # 获取项目收入或TVL
-        revenue = project_info.get('annual_revenue', 0)
-        tvl = project_info.get('tvl', 0)
+    #     # 获取项目收入或TVL
+    #     revenue = project_info.get('annual_revenue', 0)
+    #     tvl = project_info.get('tvl', 0)
         
-        # 基于市值/收入比评估
-        if revenue > 0:
-            ps_ratio = market_cap / revenue
-            if ps_ratio > 50:
-                return "严重高估"
-            elif ps_ratio > 20:
-                return "高估"
-            elif ps_ratio > 5:
-                return "合理"
-            else:
-                return "低估"
+    #     # 基于市值/收入比评估
+    #     if revenue > 0:
+    #         ps_ratio = market_cap / revenue
+    #         if ps_ratio > 50:
+    #             return "严重高估"
+    #         elif ps_ratio > 20:
+    #             return "高估"
+    #         elif ps_ratio > 5:
+    #             return "合理"
+    #         else:
+    #             return "低估"
         
-        # 基于市值/TVL比评估
-        elif tvl > 0:
-            mcap_tvl_ratio = market_cap / tvl
-            if mcap_tvl_ratio > 5:
-                return "高估"
-            elif mcap_tvl_ratio > 1:
-                return "合理"
-            else:
-                return "低估"
+    #     # 基于市值/TVL比评估
+    #     elif tvl > 0:
+    #         mcap_tvl_ratio = market_cap / tvl
+    #         if mcap_tvl_ratio > 5:
+    #             return "高估"
+    #         elif mcap_tvl_ratio > 1:
+    #             return "合理"
+    #         else:
+    #             return "低估"
         
-        # 基于价格变化评估
-        change_24h = market_data.get('change_24h', 0)
-        change_7d = market_data.get('change_7d', 0)
+    #     # 基于价格变化评估
+    #     change_24h = market_data.get('change_24h', 0)
+    #     change_7d = market_data.get('change_7d', 0)
         
-        if change_24h > 20 or change_7d > 50:
-            return "可能高估（短期涨幅过大）"
-        elif change_24h < -20 or change_7d < -50:
-            return "可能低估（短期跌幅过大）"
+    #     if change_24h > 20 or change_7d > 50:
+    #         return "可能高估（短期涨幅过大）"
+    #     elif change_24h < -20 or change_7d < -50:
+    #         return "可能低估（短期跌幅过大）"
         
-        return "未知（缺乏基本面数据）"
+    #     return "未知（缺乏基本面数据）"
     
     def _parse_response(self, content: str) -> Dict:
         """解析AI响应"""

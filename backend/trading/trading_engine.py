@@ -1,19 +1,23 @@
 """
 交易引擎 - 核心交易逻辑
 """
+import json
+from re import S
 from typing import Dict, List, Optional
 from datetime import datetime
 from loguru import logger
+from numpy import short
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.exchanges.aster_dex import aster_client
-from backend.agents.agent_team import agent_team
+from backend.agents.agent_team import AgentTeam
 from backend.agents.simple_trading_strategy import simple_strategy
 from backend.agents.stop_loss_decision_system import stop_decision_system
 from backend.agents.intelligent_stop_strategy import intelligent_stop_strategy
-from backend.database import Trade, Position, PortfolioSnapshot, AIDecision, MarketData, get_db
+from backend.database import Trade, Position, PortfolioSnapshot, AIDecision, MarketData
 from backend.config import settings
+from backend.agents.agent_team import agent_team_position,agent_team
 
 
 class TradingEngine:
@@ -25,6 +29,13 @@ class TradingEngine:
         self.total_pnl = 0.0
         self.trade_count = 0
         self.winning_trades = 0
+        
+        # 缓存机制
+        self._balance_cache = None  # 余额缓存
+        self._balance_cache_time = None  # 余额缓存时间
+        self._positions_cache = None  # 持仓缓存
+        self._positions_cache_time = None  # 持仓缓存时间
+        self._cache_ttl = 300  # 缓存有效期（秒）- 交易周期内使用同一份数据
     
     async def initialize(self, db: AsyncSession):
         """初始化交易引擎"""
@@ -41,6 +52,31 @@ class TradingEngine:
             logger.info(f"从数据库加载状态 - 余额: ${self.current_balance:.2f}, 总盈亏: ${self.total_pnl:.2f}")
         else:
             logger.info(f"初始化新账户 - 初始余额: ${self.current_balance:.2f}")
+    
+    def _is_cache_valid(self, cache_time) -> bool:
+        """检查缓存是否有效"""
+        if cache_time is None:
+            return False
+        elapsed = (datetime.now() - cache_time).total_seconds()
+        return elapsed < self._cache_ttl
+    
+    def _invalidate_balance_cache(self):
+        """使余额缓存失效"""
+        self._balance_cache = None
+        self._balance_cache_time = None
+        logger.debug("💾 余额缓存已失效")
+    
+    def _invalidate_positions_cache(self):
+        """使持仓缓存失效"""
+        self._positions_cache = None
+        self._positions_cache_time = None
+        logger.debug("💾 持仓缓存已失效")
+    
+    def _invalidate_all_cache(self):
+        """使所有缓存失效（交易完成后调用）"""
+        self._invalidate_balance_cache()
+        self._invalidate_positions_cache()
+        logger.debug("💾 所有缓存已失效")
     
     async def update_market_data(self, db: AsyncSession):
         """更新市场数据（优化实时性）"""
@@ -97,50 +133,182 @@ class TradingEngine:
             logger.debug(f"✅ 主流币种更新完成 - {len(priority_symbols)} 个")
             
         except Exception as e:
-            logger.error(f"更新市场数据失败: {e}")
+            logger.exception(f"更新市场数据失败: {e}")
     
-    async def execute_trading_cycle(self, db: AsyncSession):
+    async def execute_trading_cycle(self, db: AsyncSession,only_buy:bool = False):
         """执行一轮完整的交易周期"""
         try:
             logger.info("开始交易周期...")
             
+            # 在周期开始时清空缓存，确保获取最新数据
+            self._invalidate_all_cache()
+            
             # 1. 获取支持的交易对
-            symbols = await aster_client.get_supported_symbols()
-            logger.info(f"支持的交易对数量: {len(symbols)}")
+            all_symbols = await aster_client.get_supported_symbols()
+            logger.info(f"支持的交易对总数量: {len(all_symbols)}")
             
-            # 2. 获取当前持仓
-            positions = await self._get_current_positions(db)
+            # 2. 筛选并排序交易对：按24小时交易量筛选和排序
+            symbols = await self._filter_and_sort_symbols_by_volume(all_symbols)
+            logger.info(f"✅ 筛选后的交易对数量: {len(symbols)} (按交易量降序，取前50个)")
             
-            # 3. 获取账户余额
-            balance_info = await aster_client.get_account_balance()
+            # 3. 获取当前持仓（首次查询，会更新缓存）
+            logger.info("🔄 获取当前持仓（首次查询）...")
+            positions = await self._get_current_positions(db, use_cache=False)
             
-            # 4. 【新增】AI团队评估现有持仓的止盈止损
+            # 4. 获取账户余额（首次查询，会更新缓存）
+            # logger.info("🔄 获取账户余额（首次查询）...")
+            balance_info = await self._get_account_balance_cached(use_cache=False)
+            logger.info(f"💰 账户余额: {balance_info}")
+            if balance_info and balance_info.get("balances") and len(balance_info.get("balances")) > 0:
+                balance_info = balance_info.get("balances")[0]
+            
+            # # 4. 【新增】AI团队评估现有持仓的止盈止损
+            # if positions:
+            #     logger.info(f"📊 开始评估{len(positions)}个持仓的止盈止损...")
+            #     await self._evaluate_positions_stop_loss(db, positions)
+            temp = []
+            symbols = symbols[:20]
             if positions:
-                logger.info(f"📊 开始评估{len(positions)}个持仓的止盈止损...")
-                await self._evaluate_positions_stop_loss(db, positions)
-            
-            # 5. 遍历交易对，让AI分析新交易机会
-            for symbol in symbols[:10]:  # 限制每次分析前10个，避免API调用过多
+                for position in positions:
+                    temp.append(position.get("symbol"))
+            # 5. 遍历交易对，让AI分析新交易机会（本周期内使用缓存数据）
+            logger.info(f"📊 开始分析 {len(symbols)} 个交易对（本周期内使用缓存数据）")
+            if not only_buy:
+                if len(temp) > 0:
+                    symbols = { symbol for symbol in symbols if symbol not in temp}
+                temp = symbols
+            if len(temp) <= 0 :
+                logger.info("没有可分析的交易对,退出本次交易周期....")
+                return 
+            for symbol in temp:  # 限制每次分析前10个，避免API调用过多
                 try:
-                    await self._analyze_and_trade(db, symbol, positions)
+                    if only_buy:
+                        await self._analyze_and_trade(db, symbol, positions,balance_info,all_symbols,agent_team_position)
+                    else:
+                        await self._analyze_and_trade(db, symbol, positions,balance_info,all_symbols,agent_team)
                 except Exception as e:
-                    logger.error(f"分析 {symbol} 失败: {e}")
+                    logger.exception(f"分析 {symbol} 失败: {e}")
             
-            # 6. 更新投资组合快照
+            # 7. 更新投资组合快照
             await self._save_portfolio_snapshot(db)
             
             logger.info("交易周期完成")
             
         except Exception as e:
-            logger.error(f"交易周期执行失败: {e}")
+            logger.exception(f"交易周期执行失败: {e}")
     
-    async def _analyze_and_trade(self, db: AsyncSession, symbol: str, positions: List[Dict]):
+    async def _filter_and_sort_symbols_by_volume(self, symbols: List[str]) -> List[str]:
+        """
+        筛选并排序交易对：
+        1. 24小时交易量低于配置阈值的直接排除（默认2000万）
+        2. 按交易量从大到小排序
+        3. 取前N个交易量最大的币种（默认50个）
+        """
+        import asyncio
+        
+        MIN_VOLUME_THRESHOLD = settings.min_volume_threshold  # 从配置读取
+        MAX_SYMBOLS = settings.max_trading_symbols  # 从配置读取
+        
+        logger.info(f"🔍 开始筛选交易对：要求24H交易量≥${MIN_VOLUME_THRESHOLD:,.0f} USDT，取Top {MAX_SYMBOLS}...")
+        
+        # 获取所有交易对的行情数据（包含交易量信息）
+        symbol_volumes = []
+        
+        # 批量获取ticker数据（优化性能）
+        try:
+            # 尝试使用批量API
+            all_tickers = await aster_client.get_all_tickers()
+            if all_tickers and len(all_tickers) > 0:
+                # 从批量数据中提取交易量信息
+                for ticker in all_tickers:
+                    symbol = ticker.get("symbol", "")
+                    volume_24h = ticker.get("volume_24h", 0)
+                    
+                    # 应用筛选条件：交易量≥配置阈值
+                    if volume_24h >= MIN_VOLUME_THRESHOLD:
+                        symbol_volumes.append({
+                            "symbol": symbol,
+                            "volume_24h": volume_24h
+                        })
+                
+                logger.info(f"📊 批量获取完成，符合条件的交易对: {len(symbol_volumes)}个")
+            else:
+                raise Exception("批量API返回空数据")
+                
+        except Exception as e:
+            logger.warning(f"批量获取失败，使用单独获取: {e}")
+            
+            # 如果批量API失败，逐个获取（限制数量以避免过多API调用）
+            limited_symbols = symbols[:100]  # 只查询前100个
+            tasks = [aster_client.get_ticker(symbol) for symbol in limited_symbols]
+            tickers = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for symbol, ticker in zip(limited_symbols, tickers):
+                if isinstance(ticker, dict) and ticker:
+                    volume_24h = ticker.get("volume_24h", 0)
+                    
+                    # 应用筛选条件：交易量≥配置阈值
+                    if volume_24h >= MIN_VOLUME_THRESHOLD:
+                        symbol_volumes.append({
+                            "symbol": symbol,
+                            "volume_24h": volume_24h
+                        })
+        
+        # 按交易量从大到小排序
+        symbol_volumes.sort(key=lambda x: x["volume_24h"], reverse=True)
+        
+        # 取前N个
+        top_symbols = symbol_volumes[:MAX_SYMBOLS]
+        
+        # 打印筛选结果（前10个）
+        if top_symbols:
+            logger.info(f"🏆 Top 10 交易对（按24H交易量）:")
+            for i, item in enumerate(top_symbols[:10], 1):
+                logger.info(f"   {i}. {item['symbol']}: 交易量 ${item['volume_24h']:,.0f}")
+        else:
+            logger.warning(f"⚠️ 没有找到符合条件的交易对（交易量≥${MIN_VOLUME_THRESHOLD:,.0f}）")
+        
+        # 返回筛选后的交易对列表
+        result = [item["symbol"] for item in top_symbols]
+        logger.info(f"✅ 最终选择 {len(result)} 个交易对进行分析")
+        
+        return result
+    
+    async def _analyze_and_trade(self, db: AsyncSession, symbol: str, positions: List[Dict],balance_info: Dict,all_symbols: List[str],agent_team: AgentTeam):
         """分析单个交易对并执行交易"""
         try:
             # 获取市场数据
             ticker = await aster_client.get_ticker(symbol)
             if not ticker:
                 return
+            # 从commission_rate接口获取手续费和从symbol_info获取最小交易数量
+            commission_rate = 0
+            min_qty = 0
+            
+            # 获取手续费率（从专用API）
+            commission_info = await aster_client.get_commission_rate(symbol)
+            if commission_info:
+                # 使用taker手续费率（市价单通常使用taker费率）
+                taker_rate = commission_info.get('takerCommissionRate', 0)
+                maker_rate = commission_info.get('makerCommissionRate', 0)
+                commission_rate = float(taker_rate) if taker_rate else float(maker_rate) if maker_rate else 0
+                logger.debug(f"📊 {symbol} 手续费率: Taker={taker_rate}, Maker={maker_rate}, 使用={commission_rate}")
+            
+            # 获取最小交易数量（从symbol_info）
+            if all_symbols:
+                # 从all_symbols列表中查找当前symbol的交易对信息
+                symbol_info = next((s for s in all_symbols if s.get('symbol') == symbol), None)
+                if symbol_info:
+                    # 获取最小交易数量（可能在filters中的LOT_SIZE或直接在根级别）
+                    filters = symbol_info.get('filters', [])
+                    for f in filters:
+                        if f.get('filterType') == 'LOT_SIZE':
+                            min_qty = float(f.get('minQty', 0))
+                            break
+                    # 如果filters中没有，尝试从根级别获取
+                    if min_qty == 0:
+                        min_qty = float(symbol_info.get('minQty', symbol_info.get('minQuantity', 0)))
+                    logger.debug(f"📊 {symbol} 最小交易数量: {min_qty}")
             
             market_data = {
                 "price": ticker.get("price", 0),
@@ -148,31 +316,40 @@ class TradingEngine:
                 "high_24h": ticker.get("high_24h", 0),
                 "low_24h": ticker.get("low_24h", 0),
                 "volume_24h": ticker.get("volume_24h", 0),
-                "market_cap": ticker.get("market_cap", 0)
+                "market_cap": ticker.get("market_cap", 0),
+                "funding_rate": commission_rate if commission_rate > 0 else ticker.get("funding_rate", 0),
+                "min_qty": min_qty
             }
             
             # 保存市场数据到数据库
-            market_data_record = MarketData(
-                symbol=symbol,
-                price=market_data["price"],
-                volume_24h=market_data["volume_24h"],
-                change_24h=market_data["change_24h"],
-                high_24h=market_data["high_24h"],
-                low_24h=market_data["low_24h"]
-            )
-            db.add(market_data_record)
-            await db.commit()
-            logger.debug(f"市场数据已保存: {symbol} @ ${market_data['price']:.2f}")
+            try:
+                market_data_record = MarketData(
+                    symbol=symbol,
+                    price=market_data["price"],
+                    volume_24h=market_data["volume_24h"],
+                    change_24h=market_data["change_24h"],
+                    high_24h=market_data["high_24h"],
+                    low_24h=market_data["low_24h"]
+                )
+                db.add(market_data_record)
+                await db.commit()
+                logger.debug(f"市场数据已保存: {symbol} @ ${market_data['price']:.2f}")
+            except Exception as db_error:
+                await db.rollback()
+                logger.warning(f"保存市场数据失败（继续执行）: {symbol} - {db_error}")
             
             # 获取投资组合信息
             portfolio = {
-                "total_balance": self.current_balance,
-                "cash_balance": self.current_balance - sum(p.get('amount', 0) * p.get('current_price', 0) for p in positions),
-                "positions_value": sum(p.get('amount', 0) * p.get('current_price', 0) for p in positions),
-                "total_pnl": self.total_pnl
+                "total_balance":self.current_balance,
+                "cash_balance": float(balance_info.get("free",0))+float(balance_info.get("locked",0)),
+                "positions_value":  float(balance_info.get("locked",0)),
+                "total_pnl": self.total_pnl,
+                "available_balance": float (balance_info.get("free",0)),
             }
+            # 获取symbol 的K线数据
+            klines = await aster_client.get_klines(symbol, "1h", 100)
             
-            # 多智能体团队协同分析
+            # # 多智能体团队协同分析
             team_decision = await agent_team.conduct_team_analysis(
                 symbol=symbol,
                 market_data=market_data,
@@ -180,32 +357,35 @@ class TradingEngine:
                 positions=positions,
                 additional_data={
                     "sentiment": {},  # 可以接入真实的情绪数据API
-                    "news": []  # 可以接入真实的新闻API
-                }
+                    "news": [],  # 可以接入真实的新闻API
+                    "raw_klines": klines,
+                    "kline_interval": "1h"
+                },
+                db_session=db  # 传入数据库会话
             )
             
             # 如果AI团队决策失败（置信度为0），使用简单策略作为后备
             if team_decision['confidence'] == 0.0 or team_decision['action'] == 'hold' and team_decision['final_decision'] == 'reject':
-                logger.info(f"🔄 {symbol} AI团队不可用，使用简单策略")
+                # logger.info(f"🔄 {symbol} AI团队不可用，使用简单策略")
                 simple_decision = simple_strategy.analyze(symbol, market_data, portfolio)
                 
                 # 将简单策略的结果转换为团队决策格式
-                team_decision = {
-                    'final_decision': 'approve' if simple_decision['confidence'] >= 0.6 else 'reject',
-                    'action': simple_decision['action'],
-                    'confidence': simple_decision['confidence'],
-                    'position_size': simple_decision['position_size'],
-                    'reasoning': simple_decision['reasoning'],
-                    'stop_loss': 0,
-                    'take_profit': 0,
-                    'key_considerations': [simple_decision['reasoning']],
-                    'team_analyses': [{
-                        'role': 'simple_strategy',
-                        'recommendation': simple_decision['action'],
-                        'confidence': simple_decision['confidence'],
-                        'reasoning': simple_decision['reasoning']
-                    }]
-                }
+                # team_decision = {
+                #     'final_decision': 'approve' if simple_decision['confidence'] >= 0.6 else 'reject',
+                #     'action': simple_decision['action'],
+                #     'confidence': simple_decision['confidence'],
+                #     'position_size': simple_decision['position_size'],
+                #     'reasoning': simple_decision['reasoning'],
+                #     'stop_loss': 0,
+                #     'take_profit': 0,
+                #     'key_considerations': [simple_decision['reasoning']],
+                #     'team_analyses': [{
+                #         'role': 'simple_strategy',
+                #         'recommendation': simple_decision['action'],
+                #         'confidence': simple_decision['confidence'],
+                #         'reasoning': simple_decision['reasoning']
+                #     }]
+                # }
             
             # 保存AI决策（包含团队分析）
             ai_decision = AIDecision(
@@ -219,16 +399,36 @@ class TradingEngine:
             db.add(ai_decision)
             await db.commit()
             
+            # 处理 hold 动作：如果是持仓的币且有止盈止损，更新到数据库
+            if team_decision['action'] == 'hold':
+                # 检查是否是持仓的币
+                position = await self._get_position(db, symbol)
+                if position:
+                    # 如果决策中包含止盈止损，更新到持仓
+                    stop_loss_value = team_decision.get('stop_loss', 0)
+                    take_profit_value = team_decision.get('take_profit', 0)
+                    
+                    if stop_loss_value > 0 or take_profit_value > 0:
+                        if stop_loss_value > 0:
+                            position.stop_loss = stop_loss_value
+                        if take_profit_value > 0:
+                            position.take_profit = take_profit_value
+                        position.stop_loss_strategy = 'intelligent_stop'
+                        position.take_profit_strategy = 'intelligent_stop'
+                        await db.commit()
+                        
+            
             # 只有在投资组合经理批准且置信度足够时才执行交易
             if (team_decision['final_decision'] == 'approve' and 
-                team_decision['confidence'] >= 0.6 and
+                team_decision['confidence'] >= settings.confidence_threshold and
                 team_decision['action'] != 'hold'):
                 await self._execute_trade(db, symbol, team_decision, market_data)
             else:
                 logger.info(f"⏸️  {symbol} 交易未批准 - {team_decision['reasoning'][:100]}")
             
         except Exception as e:
-            logger.error(f"分析交易 {symbol} 失败: {e}")
+            await db.rollback()  # 确保事务回滚
+            logger.exception(f"分析交易 {symbol} 失败: {e}")
     
     async def _execute_trade(self, db: AsyncSession, symbol: str, team_decision: Dict, market_data: Dict):
         """执行交易"""
@@ -238,12 +438,12 @@ class TradingEngine:
             return
         
         try:
-            # 获取当前持仓信息
-            positions = await self._get_current_positions(db)
+            # 获取当前持仓信息（使用缓存）
+            positions = await self._get_current_positions(db, use_cache=True)
             positions_value = sum(p['amount'] * p['current_price'] for p in positions)
             
-            # 获取账户余额信息
-            balance_info = await aster_client.get_account_balance()
+            # 获取账户余额信息（使用缓存）
+            balance_info = await self._get_account_balance_cached(use_cache=True)
             cash_balance = self.current_balance - positions_value
             
             current_price = market_data['price']
@@ -251,18 +451,20 @@ class TradingEngine:
             # 对于平仓操作（sell/cover），需要特殊处理
             if action in ["sell", "cover"]:
                 await self._execute_close_position(db, symbol, action, current_price, team_decision)
+                # 平仓后使缓存失效
+                self._invalidate_all_cache()
                 return
             
             # 对于开仓操作（buy/short），进行风控计算
             # 计算交易金额 - 应用严格风控规则
-            position_size = team_decision.get('position_size', 0.1)
+            position_size_pct = team_decision.get('position_size_pct', 0.1)
             
             # 风控规则1: 每笔交易不超过钱包余额的配置百分比（默认50%）
             max_wallet_usage = settings.max_wallet_usage
             max_trade_by_wallet = cash_balance * max_wallet_usage
             
             # 风控规则2: 使用AI建议的仓位，但不超过钱包限制
-            ai_suggested_value = self.current_balance * position_size
+            ai_suggested_value = self.current_balance * position_size_pct
             
             # 取两者较小值
             max_trade_value = min(max_trade_by_wallet, ai_suggested_value)
@@ -283,11 +485,6 @@ class TradingEngine:
                 logger.warning(f"⚠️ 余额不足：需要${max_trade_value:.2f}，可用${cash_balance:.2f}")
                 return
             
-            # 风控规则4: 确保交易金额有意义（至少$10）
-            min_trade_value = 10.0
-            if max_trade_value < min_trade_value:
-                logger.warning(f"⚠️ 交易金额过小：${max_trade_value:.2f} < ${min_trade_value:.2f}，跳过交易")
-                return
             
             # 计算交易数量
             amount = max_trade_value / current_price
@@ -300,7 +497,7 @@ class TradingEngine:
             logger.info(f"💰 风控计算详情:")
             logger.info(f"   现金余额: ${cash_balance:.2f}")
             logger.info(f"   持仓价值: ${positions_value:.2f}")
-            logger.info(f"   AI建议使用: ${ai_suggested_value:.2f} ({position_size*100:.1f}%总资产)")
+            logger.info(f"   AI建议使用: ${ai_suggested_value:.2f} ({position_size_pct*100:.1f}%总资产)")
             logger.info(f"   钱包限制({max_wallet_usage*100:.0f}%): ${max_trade_by_wallet:.2f}")
             logger.info(f"   实际使用: ${max_trade_value:.2f}")
             logger.info(f"   交易数量: {amount_before:.8f} {symbol} -> {amount} {symbol} (精度调整)")
@@ -317,7 +514,7 @@ class TradingEngine:
             
             elif action == "short":
                 # 做空
-                logger.info(f"📉 执行做空: {symbol}")
+                logger.info(f"📉 执行做空买入: {symbol}")
                 order_result = await aster_client.place_short_order(symbol, amount)
             
             # 记录交易
@@ -338,19 +535,27 @@ class TradingEngine:
                     success=True,
                     order_id=order_result.get('order_id', ''),
                     profit_loss=None,  # 开仓不计算盈亏
-                    profit_loss_percentage=None
+                    profit_loss_percentage=None,
+                    executed_at=datetime.now(),  # 记录交易执行时间
+                    stop_loss=team_decision.get('stop_loss', 0),  # 止损价格
+                    take_profit=team_decision.get('take_profit', 0),  # 止盈价格
+                    stop_loss_strategy='intelligent_stop',  # 止损策略类型
+                    take_profit_strategy='intelligent_stop'  # 止盈策略类型
                 )
                 db.add(trade)
                 await db.commit()
                 await db.refresh(trade)
                 
                 self.trade_count += 1
-                action_name = "买入做多" if action == "buy" else "做空"
+                action_name = "买入做多" if (action == "buy" or action == "long") else "做空"
                 logger.info(f"✅ {action_name}成功: ID={trade.id}, {symbol} {amount:.6f} @ ${current_price:.2f}")
                 
-                # 立即更新持仓数据
-                await self._update_positions_after_trade(db)
-                logger.info(f"📊 持仓数据已更新")
+                # 立即更新持仓数据（包含止损止盈信息）
+                await self._update_positions_after_trade(db, symbol, team_decision=team_decision, trade=trade)
+                logger.info(f"📊 持仓数据已更新（含止损止盈）")
+                
+                # 开仓后使缓存失效（确保下次查询获取最新数据）
+                self._invalidate_all_cache()
                 
                 # 【新增】如果有止盈止损配置，加入监控
                 if team_decision.get('stop_loss', 0) > 0 or team_decision.get('take_profit', 0) > 0:
@@ -379,15 +584,15 @@ class TradingEngine:
                     success=False,
                     order_id='',
                     profit_loss=None,
-                    profit_loss_percentage=None
+                    profit_loss_percentage=None,
+                    executed_at=datetime.now()  # 记录交易执行时间
                 )
                 db.add(trade)
                 await db.commit()
         
         except Exception as e:
-            logger.error(f"交易执行失败: {e}")
-            import traceback
-            traceback.print_exc()
+            await db.rollback()  # 确保事务回滚
+            logger.exception(f"交易执行失败: {e}")
     
     async def _execute_close_position(
         self, 
@@ -416,17 +621,18 @@ class TradingEngine:
                 return
             
             # 验证持仓类型匹配
-            if action == "sell" and position.side != "buy":
-                logger.warning(f"⚠️ 无法执行sell：{symbol}持仓类型为{position.side}，不是多仓")
+            if action == "sell" and (position.position_type != "buy" and position.position_type != "long"):
+                logger.warning(f"⚠️ 无法执行sell：{symbol}持仓类型为{position.position_type}，不是多仓")
                 return
             
-            if action == "cover" and position.side != "short":
-                logger.warning(f"⚠️ 无法执行cover：{symbol}持仓类型为{position.side}，不是空仓")
+            if action == "cover" and position.position_type != "short":
+                logger.warning(f"⚠️ 无法执行cover：{symbol}持仓类型为{position.position_type}，不是空仓")
                 return
             
             # 获取持仓数量
             close_amount = position.amount
-            entry_price = position.average_price
+            # 优先使用entry_price，如果不存在则使用average_price
+            entry_price = position.entry_price if position.entry_price else position.average_price
             
             if close_amount <= 0:
                 logger.warning(f"⚠️ 无法执行{action}：{symbol}持仓数量为0")
@@ -456,14 +662,13 @@ class TradingEngine:
                 # 平空仓（买入平仓）
                 logger.info(f"📥 执行买入平空仓: {symbol}")
                 # 根据交易所API，平空仓可能需要特殊处理
-                # 方案1: 使用close_position
                 try:
-                    order_result = await aster_client.close_position(symbol)
-                except:
                     # 方案2: 如果close_position不支持，使用买入
                     order_result = await aster_client.place_order(
                         symbol, "buy", "market", close_amount
                     )
+                except Exception as e:
+                    logger.exception(f"平仓失败: {symbol} {action} - {e}")
             
             # 记录交易结果
             if order_result and order_result.get('success', False):
@@ -480,9 +685,12 @@ class TradingEngine:
                     profit_loss = 0
                     profit_loss_percentage = 0
                 
-                # 更新总盈亏
+                # 判断是否盈利
+                is_profitable = profit_loss > 0
+                
+                # 更新总盈亏和胜率统计
                 self.total_pnl += profit_loss
-                if profit_loss > 0:
+                if is_profitable:
                     self.winning_trades += 1
                 
                 # 记录交易到数据库
@@ -497,7 +705,10 @@ class TradingEngine:
                     success=True,
                     order_id=order_result.get('order_id', ''),
                     profit_loss=profit_loss,
-                    profit_loss_percentage=profit_loss_percentage
+                    profit_loss_percentage=profit_loss_percentage,
+                    executed_at=datetime.now(),  # 记录交易执行时间
+                    is_profitable=is_profitable,  # 是否盈利
+                    entry_price=entry_price  # 入场价格
                 )
                 db.add(trade)
                 await db.commit()
@@ -519,7 +730,7 @@ class TradingEngine:
                 logger.info(f"🗑️  已移除持仓监控: {position_id}")
                 
                 # 更新持仓数据
-                await self._update_positions_after_trade(db)
+                await self._update_positions_after_trade(db, symbol)
                 logger.info(f"📊 持仓数据已更新")
                 
             else:
@@ -536,22 +747,21 @@ class TradingEngine:
                     success=False,
                     order_id='',
                     profit_loss=None,
-                    profit_loss_percentage=None
+                    profit_loss_percentage=None,
+                    executed_at=datetime.now()  # 记录交易执行时间
                 )
                 db.add(trade)
                 await db.commit()
         
         except Exception as e:
-            logger.error(f"平仓执行失败: {symbol} {action} - {e}")
-            import traceback
-            traceback.print_exc()
+            await db.rollback()  # 确保事务回滚
+            logger.exception(f"平仓执行失败: {symbol} {action} - {e}")
     
     async def _update_balance(self, db: AsyncSession):
         """更新账户余额 - 从SDK实时查询钱包余额"""
         try:
             # 从交易所SDK获取最新钱包余额
             balance_info = await aster_client.get_account_balance()
-            logger.info(f"💰 SDK余额查询结果: {balance_info}")
             
             # 处理余额信息（真实模式和模拟模式都支持）
             if balance_info.get('success'):
@@ -568,17 +778,31 @@ class TradingEngine:
                     # 总资产 = 钱包余额 + 持仓价值
                     self.current_balance = wallet_balance + positions_value
                     
-                    logger.info(f"💰 钱包余额SDK更新: 钱包=${wallet_balance:.2f}, 持仓=${positions_value:.2f}, 总计=${self.current_balance:.2f}")
+                    # logger.info(f"💰 钱包余额SDK更新: 钱包=${wallet_balance:.2f}, 持仓=${positions_value:.2f}, 总计=${self.current_balance:.2f}")
                 else:
                     logger.warning(f"⚠️ 未找到USDT余额，使用当前余额: ${self.current_balance:.2f}")
             else:
                 logger.warning(f"⚠️ SDK获取余额失败，使用当前余额: ${self.current_balance:.2f}")
                     
         except Exception as e:
-            logger.error(f"SDK更新余额失败: {e}")
+            logger.exception(f"SDK更新余额失败: {e}")
     
-    async def _update_positions_after_trade(self, db: AsyncSession):
-        """交易后立即更新持仓数据"""
+    async def _update_positions_after_trade(
+        self,
+        db: AsyncSession,
+        traded_symbol: str = None,
+        team_decision: Dict = None,
+        trade: Trade = None,
+    ):
+        """
+        交易后立即更新持仓数据
+        
+        Args:
+            db: 数据库会话
+            traded_symbol: 刚交易的交易对符号（可选）
+            team_decision: 团队决策信息，包含止损止盈（可选）
+            trade: 交易记录（可选，用于获取止损止盈）
+        """
         try:
             # 从交易所获取最新持仓
             positions = await aster_client.get_open_positions()
@@ -599,39 +823,111 @@ class TradingEngine:
                     db_pos.average_price = pos.get('average_price', db_pos.average_price)
                     db_pos.position_type = pos.get('position_type', db_pos.position_type)
                     db_pos.last_updated = datetime.now()
+                    
+                    # 如果是刚交易的symbol，更新止损止盈
+                    if symbol == traded_symbol:
+                        if team_decision:
+                            stop_loss_value = team_decision.get('stop_loss', 0)
+                            take_profit_value = team_decision.get('take_profit', 0)
+                        elif trade:
+                            stop_loss_value = trade.stop_loss or 0
+                            take_profit_value = trade.take_profit or 0
+                        else:
+                            stop_loss_value = db_pos.stop_loss or 0
+                            take_profit_value = db_pos.take_profit or 0
+
+                        db_pos.stop_loss = stop_loss_value
+                        db_pos.take_profit = take_profit_value
+                        db_pos.stop_loss_strategy = 'intelligent_stop'
+                        db_pos.take_profit_strategy = 'intelligent_stop'
+                        logger.info(f"✅ 更新持仓止损止盈: {symbol} SL=${db_pos.stop_loss:.2f} TP=${db_pos.take_profit:.2f}")
                 else:
                     # 添加新持仓
+                    # 如果是刚交易的symbol，使用team_decision中的止损止盈
+                    if symbol == traded_symbol:
+                        if team_decision:
+                            stop_loss = team_decision.get('stop_loss', 0)
+                            take_profit = team_decision.get('take_profit', 0)
+                        elif trade:
+                            stop_loss = trade.stop_loss or 0
+                            take_profit = trade.take_profit or 0
+                        else:
+                            stop_loss = 0
+                            take_profit = 0
+                    else:
+                        # 否则使用默认值或计算值
+                        entry_price = pos.get('average_price', 0)
+                        position_type = pos.get('position_type', 'long')
+                        if position_type in ['long', 'buy']:
+                            stop_loss = entry_price * 0.98  # -2%
+                            take_profit = entry_price * 1.04  # +4%
+                        else:
+                            stop_loss = entry_price * 1.02  # +2%
+                            take_profit = entry_price * 0.96  # -4%
+                    
                     new_pos = Position(
                         symbol=symbol,
                         amount=pos['amount'],
                         average_price=pos['average_price'],
                         current_price=pos['current_price'],
                         unrealized_pnl=pos['unrealized_pnl'],
-                        position_type=pos.get('position_type', 'long')
+                        position_type=pos.get('position_type', 'long'),
+                        entry_price=pos.get('average_price'),  # 记录入场价格
+                        stop_loss=stop_loss,  # 止损价格
+                        take_profit=take_profit,  # 止盈价格
+                        stop_loss_strategy='intelligent_stop',
+                        take_profit_strategy='intelligent_stop',
+                        executed_at=datetime.now()  # 持仓创建时间
                     )
                     db.add(new_pos)
+                    logger.info(f"✅ 新增持仓记录: {symbol} SL=${stop_loss:.2f} TP=${take_profit:.2f}")
             
             # 删除已平仓的持仓
             current_symbols = {p['symbol'] for p in positions}
-            for symbol, db_pos in db_positions.items():
-                if symbol not in current_symbols:
-                    db.delete(db_pos)
+            symbols_to_remove = [symbol for symbol in db_positions.keys() if symbol not in current_symbols]
+            for symbol in symbols_to_remove:
+                db_pos = db_positions[symbol]
+                await db.delete(db_pos)
+                logger.info(f"🗑️  删除已平仓持仓记录: {symbol}")
             
             await db.commit()
             logger.debug(f"持仓数据已同步: {len(positions)} 个持仓")
             
         except Exception as e:
-            logger.error(f"更新持仓数据失败: {e}")
+            await db.rollback()  # 确保事务回滚
+            logger.exception(f"更新持仓数据失败: {e}")
+        
+        return positions
     
-    async def _get_current_positions(self, db: AsyncSession) -> List[Dict]:
-        """获取当前持仓"""
+    async def _get_current_positions(self, db: AsyncSession, use_cache: bool = True) -> List[Dict]:
+        """
+        获取当前持仓（带缓存）
+        
+        Args:
+            db: 数据库会话
+            use_cache: 是否使用缓存，默认True
+        
+        Returns:
+            持仓列表
+        """
+        # 检查缓存
+        if use_cache and self._is_cache_valid(self._positions_cache_time):
+            # logger.debug("💾 使用持仓缓存数据")
+            return self._positions_cache
+        
+        # logger.debug("🔄 从API获取最新持仓数据...")
         # 从交易所获取实时持仓（模拟模式下从mock_market获取）
         positions = await aster_client.get_open_positions()
+        
+        # 更新缓存
+        self._positions_cache = positions
+        self._positions_cache_time = datetime.now()
+        # logger.debug(f"💾 持仓数据已缓存: {len(positions)} 个持仓")
         
         # 也从数据库获取持仓记录并同步
         db_result = await db.execute(select(Position))
         db_positions = {p.symbol: p for p in db_result.scalars().all()}
-        
+        result_positions = []
         # 更新数据库中的持仓
         for pos in positions:
             symbol = pos['symbol']
@@ -641,26 +937,63 @@ class TradingEngine:
                 db_pos.amount = pos['amount']
                 db_pos.current_price = pos['current_price']
                 db_pos.unrealized_pnl = pos['unrealized_pnl']
+                result_positions.append(db_pos)
             else:
-                # 添加新持仓
+                # 添加新持仓（计算默认止损止盈）
+                entry_price = pos.get('average_price', 0)
+                position_type = pos.get('position_type', 'long')
+                
+                # 根据持仓类型计算默认止损止盈
+                if position_type in ['long', 'buy']:
+                    stop_loss = entry_price * 0.98  # -2%
+                    take_profit = entry_price * 1.04  # +4%
+                else:
+                    stop_loss = entry_price * 1.02  # +2%
+                    take_profit = entry_price * 0.96  # -4%
+                
                 new_pos = Position(
                     symbol=symbol,
                     amount=pos['amount'],
                     average_price=pos['average_price'],
                     current_price=pos['current_price'],
                     unrealized_pnl=pos['unrealized_pnl'],
-                    position_type=pos['position_type']
+                    position_type=position_type,
+                    entry_price=entry_price,  # 记录入场价格
+                    stop_loss=stop_loss,  # 止损价格
+                    take_profit=take_profit,  # 止盈价格
+                    stop_loss_strategy='default',
+                    take_profit_strategy='default',
+                    executed_at=datetime.now()  # 持仓创建时间
                 )
                 db.add(new_pos)
+                result_positions.append(new_pos)
         
-            # 删除已平仓的持仓
-            current_symbols = {p['symbol'] for p in positions}
-            for symbol, db_pos in db_positions.items():
-                if symbol not in current_symbols:
-                    db.delete(db_pos)
-        
+        # 删除已平仓的持仓
+        current_symbols = {p['symbol'] for p in positions}
+        symbols_to_remove = [symbol for symbol in db_positions.keys() if symbol not in current_symbols]
+        for symbol in symbols_to_remove:
+            db_pos = db_positions[symbol]
+            await db.delete(db_pos)
+            
+        positions = []
         await db.commit()
-        
+        for pos in result_positions:
+            positions.append({
+                "symbol": pos.symbol,
+                "amount": pos.amount,
+                "current_price": pos.current_price,
+                "average_price": pos.average_price,
+                "entry_price": pos.entry_price if pos.entry_price else pos.average_price,  # 添加入场价格
+                "unrealized_pnl": pos.unrealized_pnl,
+                "stop_loss": pos.stop_loss,
+                "take_profit": pos.take_profit,
+                "executed_at": pos.executed_at,
+                "position_type": pos.position_type,
+                "stop_loss_strategy": pos.stop_loss_strategy,
+                "take_profit_strategy": pos.take_profit_strategy,
+                "stop_loss_strategy": pos.stop_loss_strategy,
+                "executed_at": pos.executed_at,
+            })
         return positions
     
     async def _get_position(self, db: AsyncSession, symbol: str) -> Optional[Position]:
@@ -669,6 +1002,32 @@ class TradingEngine:
             select(Position).where(Position.symbol == symbol)
         )
         return result.scalar_one_or_none()
+    
+    async def _get_account_balance_cached(self, use_cache: bool = True) -> Dict:
+        """
+        获取账户余额（带缓存）
+        
+        Args:
+            use_cache: 是否使用缓存，默认True
+        
+        Returns:
+            余额信息字典
+        """
+        # 检查缓存
+        if use_cache and self._is_cache_valid(self._balance_cache_time):
+            logger.debug("💾 使用余额缓存数据")
+            return self._balance_cache
+        
+        logger.debug("🔄 从API获取最新余额数据...")
+        # 从交易所SDK获取最新钱包余额
+        balance_info = await aster_client.get_account_balance()
+        
+        # 更新缓存
+        self._balance_cache = balance_info
+        self._balance_cache_time = datetime.now()
+        logger.debug(f"💾 余额数据已缓存")
+        
+        return balance_info
     
     def _adjust_trade_precision(self, symbol: str, amount: float) -> float:
         """调整交易数量精度，避免精度错误（统一精度配置）"""
@@ -830,13 +1189,13 @@ class TradingEngine:
             logger.info(f"   风险回报比: 1:{stop_levels.get('risk_reward_ratio', 0):.2f}")
             
         except Exception as e:
-            logger.error(f"注册持仓到止盈止损系统失败: {e}")
+            logger.exception(f"注册持仓到止盈止损系统失败: {e}")
     
     async def _evaluate_positions_stop_loss(self, db: AsyncSession, positions: List[Dict]):
         """评估所有持仓的止盈止损（AI团队协同决策）"""
         try:
             portfolio = await self.get_portfolio_summary(db)
-            
+            logger.info(f"获取账户余额和持仓数据: {portfolio}")
             for position in positions:
                 try:
                     symbol = position['symbol']
@@ -857,6 +1216,7 @@ class TradingEngine:
                     
                     # 检查持仓是否已在系统中
                     position_status = stop_decision_system.get_position_status(position_id)
+                    logger.info(f"获取持仓状态: {position_status}")
                     if not position_status:
                         # 如果不在系统中，先注册
                         logger.info(f"📝 持仓{position_id}不在监控中，先注册...")
@@ -923,10 +1283,10 @@ class TradingEngine:
                         logger.debug(f"⏸️  继续持仓: {symbol} - {decision['reasoning']}")
                 
                 except Exception as e:
-                    logger.error(f"评估持仓{position.get('symbol')}止盈止损失败: {e}")
+                    logger.exception(f"评估持仓{position.get('symbol')}止盈止损失败: {e}")
         
         except Exception as e:
-            logger.error(f"评估持仓止盈止损失败: {e}")
+            logger.exception(f"评估持仓止盈止损失败: {e}")
     
     async def _save_portfolio_snapshot(self, db: AsyncSession):
         """保存投资组合快照（基于SDK钱包余额）"""
@@ -1038,7 +1398,7 @@ class TradingEngine:
         initial_balance = settings.initial_balance
         total_pnl_percentage = (total_pnl_value / initial_balance * 100) if initial_balance > 0 else 0
         
-        logger.info(f"📊 投资组合SDK查询: 钱包=${wallet_balance:.2f}, 持仓=${positions_value:.2f}, 总计=${correct_total_balance:.2f}, 盈亏=${total_pnl_value:.2f}")
+        # logger.info(f"📊 投资组合SDK查询: 钱包=${wallet_balance:.2f}, 持仓=${positions_value:.2f}, 总计=${correct_total_balance:.2f}, 盈亏=${total_pnl_value:.2f}")
         
         return {
             "total_balance": correct_total_balance,  # 钱包余额 + 持仓价值

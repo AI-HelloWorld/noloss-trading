@@ -9,7 +9,7 @@ import openai
 import aiohttp
 
 from backend.agents.base_agent import BaseAgent, AgentRole, AgentAnalysis
-from backend.agents.prompts import TECHNICAL_ANALYST_PROMPT, get_risk_control_context
+from backend.agents.prompts import TECHNICAL_ANALYST_PROMPT, get_technical_analyst_context
 
 
 class TechnicalAnalyst(BaseAgent):
@@ -44,39 +44,37 @@ class TechnicalAnalyst(BaseAgent):
         try:
             # 获取K线数据（如果有）
             kline_data = additional_data.get('kline_compressed', {}) if additional_data else {}
-            
             # 计算技术指标（这里可以使用真实的技术指标库）
             technical_indicators = self._calculate_indicators(market_data, kline_data)
             
             # 构建分析上下文（注入风控配置）
             kline_summary = ""
-            if kline_data and kline_data.get('summary'):
-                kline_summary = f"""
-K线数据分析 ({kline_data.get('interval', 'unknown')}):
-- 周期数: {kline_data['summary'].get('periods', 0)}
-- 价格变化: {kline_data['summary'].get('price_change_pct', 0):.2f}%
-- 波动率: {kline_data['summary'].get('volatility', 0):.2f}%
-- 趋势: {kline_data.get('trend_analysis', {}).get('primary_trend', 'unknown')}
-- 技术特征: {json.dumps(kline_data.get('technical_features', {}), ensure_ascii=False, indent=2)}
-"""
+            if kline_data and kline_data.get('formatted_summary'):
+                kline_summary = kline_data.get('formatted_summary')
             
-            analysis_context = f"""
-{get_risk_control_context()}
-
-当前交易对：{symbol}
+            analysis_context = f"""当前交易对：{symbol}
+{get_technical_analyst_context()}
 市场数据：{json.dumps(market_data, ensure_ascii=False, indent=2)}
 
-{kline_summary}
+K线数据总结：{kline_summary}
 
 技术指标：
 {json.dumps(technical_indicators, ensure_ascii=False, indent=2)}
 
-请基于以上数据（包括K线数据）进行深度技术分析，给出交易建议。
-注意：建议的仓位大小必须符合系统风控规则！
+===== 分析要求 =====
+请基于以上核心数据，进行短线技术分析并输出交易建议。
+
+重点考量：
+1. 趋势与反转信号平衡 - RSI超卖vs整体下跌趋势
+2. 关键价位博弈 - 当前接近支撑位的反应
+3. 风险调整 - 严格按风控规则计算仓位
+4. 时间框架匹配 - 1小时图表的短线机会
+
+注意：避免过度依赖单一指标，需综合判断。
 """
             
             prompt = analysis_context
-            
+            logger.info(f"技术分析师提示词: {TECHNICAL_ANALYST_PROMPT}\n {prompt}")
             # 使用DeepSeek API
             async with aiohttp.ClientSession() as session:
                 headers = {
@@ -90,7 +88,7 @@ K线数据分析 ({kline_data.get('interval', 'unknown')}):
                         {"role": "system", "content": TECHNICAL_ANALYST_PROMPT},
                         {"role": "user", "content": prompt}
                     ],
-                    "temperature": 0.7,
+                    "temperature": 0.3,
                     "max_tokens": 1000
                 }
                 
@@ -117,7 +115,7 @@ K线数据分析 ({kline_data.get('interval', 'unknown')}):
                 reasoning=result.get('reasoning', '技术分析'),
                 key_metrics=result.get('key_metrics', technical_indicators),
                 risk_score=float(result.get('risk_score', 0.5)),
-                priority=1  # 技术分析对短期交易最重要
+                priority=5  # 技术分析对短期交易最重要
             )
             
         except Exception as e:
@@ -133,89 +131,270 @@ K线数据分析 ({kline_data.get('interval', 'unknown')}):
             )
     
     def _calculate_indicators(self, market_data: Dict, kline_data: Dict = None) -> Dict:
-        """改进的技术指标计算 - 平衡多空信号，集成K线数据"""
+        """技术指标整合分析 - 生成统一的技术指标报告"""
         price = market_data.get('price', 0)
         high = market_data.get('high_24h', price)
         low = market_data.get('low_24h', price)
         change = market_data.get('change_24h', 0)
         volume = market_data.get('volume_24h', 0)
         
-        # 如果有K线数据，使用K线数据的技术特征
-        if kline_data and kline_data.get('technical_features'):
-            tech_features = kline_data['technical_features']
+        # ============ 1. 趋势分析 ============
+        trend_info = self._analyze_trend_integrated(market_data, kline_data)
+        
+        # ============ 2. 震荡指标（RSI） ============
+        rsi_info = self._analyze_rsi_integrated(market_data, kline_data)
+        
+        # ============ 3. 关键价位 ============
+        key_levels_info = self._analyze_key_levels_integrated(market_data, kline_data)
+        
+        # ============ 4. 成交量分析 ============
+        volume_info = self._analyze_volume_integrated(market_data, kline_data)
+        
+        # ============ 5. 波动率分析（ATR） ============
+        volatility_info = self._analyze_volatility_integrated(market_data, kline_data)
+        
+        # 生成整合的技术指标报告
+        integrated_indicators = {
+            "趋势分析": trend_info,
+            "震荡指标": rsi_info,
+            "关键价位": key_levels_info,
+            "成交量分析": volume_info,
+            "波动率": volatility_info,
             
-            # 使用K线数据的RSI
-            if tech_features.get('rsi'):
-                rsi = tech_features['rsi'].get('rsi', 50)
-            else:
-                rsi = self._calculate_rsi(price, change)
-            
-            # 使用K线数据的趋势
-            trend_analysis = kline_data.get('trend_analysis', {})
-            trend_direction = trend_analysis.get('primary_trend', 'unknown')
-            if trend_direction == 'uptrend':
-                trend_direction = 'uptrend'
-            elif trend_direction == 'downtrend':
-                trend_direction = 'downtrend'
-            else:
-                trend_direction = self._assess_trend(market_data)
-            
-            # 使用K线数据的支撑阻力
-            if tech_features.get('support_resistance'):
-                support_resistance = tech_features['support_resistance']
-            else:
-                support_resistance = self._analyze_support_resistance(market_data)
-        else:
-            # 没有K线数据，使用原始计算
-            rsi = self._calculate_rsi(price, change)
-            trend_direction = self._assess_trend(market_data)
-            support_resistance = self._analyze_support_resistance(market_data)
-        
-        # 计算关键支撑阻力位（用于止盈止损）
-        # 优先使用K线数据的关键位
-        if kline_data and kline_data.get('key_levels'):
-            key_levels = kline_data['key_levels']
-        else:
-            key_levels = self._calculate_key_levels(market_data)
-        
-        # 多空信号平衡计算（集成K线数据）
-        bullish_signals = self._identify_bullish_signals_advanced(market_data, rsi, trend_direction, kline_data)
-        bearish_signals = self._identify_bearish_signals_advanced(market_data, rsi, trend_direction, kline_data)
-        
-        # 净信号强度（正值看多，负值看空）
-        net_signal = bullish_signals - bearish_signals
-        
-        # 波动率计算
-        volatility = round(((high - low) / price) * 100, 2) if price > 0 else 0
-        
-        indicators = {
-            "price": price,
-            "rsi": round(rsi, 2),
-            "rsi_signal": "超买" if rsi > 70 else "超卖" if rsi < 30 else "中性",
-            "trend_direction": trend_direction,
-            "trend_strength": self._calculate_trend_strength(market_data),
-            "bullish_signals": round(bullish_signals, 3),
-            "bearish_signals": round(bearish_signals, 3),
-            "net_signal": round(net_signal, 3),
-            "momentum": self._calculate_momentum(market_data),
-            "volatility": volatility,
-            "volume_trend": self._analyze_volume_trend(market_data),
-            "key_levels": key_levels,
-            "support_resistance": support_resistance,
-            "stop_suggestions": self._suggest_stop_levels(price, volatility, key_levels),
-            "kline_based": bool(kline_data)  # 标记是否使用了K线数据
+            # 保留原始数据供其他模块使用
+            "_raw": {
+                "price": price,
+                "kline_based": bool(kline_data),
+                "bullish_signals": self._identify_bullish_signals_advanced(market_data, rsi_info["RSI"], trend_info["方向"], kline_data),
+                "bearish_signals": self._identify_bearish_signals_advanced(market_data, rsi_info["RSI"], trend_info["方向"], kline_data),
+            }
         }
         
-        # 如果有K线数据，添加K线分析摘要
-        if kline_data:
-            indicators["kline_summary"] = {
-                "interval": kline_data.get('interval', 'unknown'),
-                "periods": kline_data.get('summary', {}).get('periods', 0),
-                "price_action": kline_data.get('price_action', {}),
-                "volume_analysis": kline_data.get('volume_analysis', {})
-            }
+        return integrated_indicators
+    
+    def _analyze_trend_integrated(self, market_data: Dict, kline_data: Dict = None) -> Dict:
+        """整合的趋势分析"""
+        change = market_data.get('change_24h', 0)
         
-        return indicators
+        # 优先使用K线数据的趋势分析
+        if kline_data and kline_data.get('trend_analysis'):
+            trend_analysis = kline_data['trend_analysis']
+            primary_trend = trend_analysis.get('primary_trend', 'sideways')
+            confidence = trend_analysis.get('confidence', 50)
+            
+            # 转换趋势方向为中文
+            if primary_trend == 'uptrend':
+                direction = "上涨趋势"
+            elif primary_trend == 'downtrend':
+                direction = "下跌趋势"
+            else:
+                direction = "横盘震荡"
+            
+            # 趋势强度（基于置信度）
+            strength = round(confidence / 10, 1)  # 转换为1-10的强度
+        else:
+            # 没有K线数据，使用简化计算
+            if change > 2:
+                direction = "上涨趋势"
+                strength = min(10, abs(change) / 2)
+            elif change < -2:
+                direction = "下跌趋势"
+                strength = min(10, abs(change) / 2)
+            else:
+                direction = "横盘震荡"
+                strength = 1.0
+        
+        # 动量描述
+        momentum = self._calculate_momentum(market_data)
+        
+        return {
+            "方向": direction,
+            "强度": round(strength, 1),
+            "动量": momentum
+        }
+    
+    def _analyze_rsi_integrated(self, market_data: Dict, kline_data: Dict = None) -> Dict:
+        """整合的RSI分析"""
+        change = market_data.get('change_24h', 0)
+        
+        # 优先使用K线数据的RSI
+        if kline_data and kline_data.get('technical_features', {}).get('rsi'):
+            rsi_data = kline_data['technical_features']['rsi']
+            rsi = rsi_data.get('rsi', 50)
+            rsi_signal = rsi_data.get('signal', '中性')
+        else:
+            # 使用简化的RSI计算
+            rsi = self._calculate_rsi(market_data.get('price', 0), change)
+            if rsi > 70:
+                rsi_signal = "超买"
+            elif rsi < 30:
+                rsi_signal = "超卖"
+            else:
+                rsi_signal = "中性"
+        
+        # RSI状态和信号
+        if rsi < 30:
+            status = "超卖区域"
+            signal = "潜在反弹"
+        elif rsi > 70:
+            status = "超买区域"
+            signal = "潜在回调"
+        elif rsi < 50:
+            status = "弱势区域"
+            signal = "谨慎观望"
+        else:
+            status = "强势区域"
+            signal = "持续关注"
+        
+        return {
+            "RSI": round(rsi, 2),
+            "状态": status,
+            "信号": signal
+        }
+    
+    def _analyze_key_levels_integrated(self, market_data: Dict, kline_data: Dict = None) -> Dict:
+        """整合的关键价位分析"""
+        price = market_data.get('price', 0)
+        
+        # 优先使用K线数据的关键价位
+        if kline_data and kline_data.get('key_levels'):
+            key_levels = kline_data['key_levels']
+            support_levels = key_levels.get('support_levels', [])
+            resistance_levels = key_levels.get('resistance_levels', [])
+            price_position = key_levels.get('price_position', 50)
+        else:
+            # 使用简化的计算
+            high = market_data.get('high_24h', price)
+            low = market_data.get('low_24h', price)
+            
+            support_levels = [
+                round(low, 2),
+                round(price * 0.98, 2),
+                round(price * 0.95, 2)
+            ]
+            
+            resistance_levels = [
+                round(high, 2),
+                round(price * 1.02, 2),
+                round(price * 1.05, 2)
+            ]
+            
+            price_position = round((price - low) / (high - low) * 100, 2) if high > low else 50
+        
+        # 判断当前位置描述
+        if price_position < 20:
+            position_desc = "接近第一支撑"
+        elif price_position < 40:
+            position_desc = "支撑区域附近"
+        elif price_position < 60:
+            position_desc = "中性位置"
+        elif price_position < 80:
+            position_desc = "阻力区域附近"
+        else:
+            position_desc = "接近或者破阻力位"
+        return {
+            "支撑位": [int(s) if s > 100 else round(s, 4) for s in support_levels[:3]],
+            "阻力位": [int(r) if r > 100 else round(r, 4) for r in resistance_levels[:3]],
+            "当前位置": position_desc
+        }
+    
+    def _analyze_volume_integrated(self, market_data: Dict, kline_data: Dict = None) -> Dict:
+        """整合的成交量分析"""
+        
+        # 优先使用K线数据的成交量分析
+        if kline_data and kline_data.get('volume_analysis'):
+            vol_analysis = kline_data['volume_analysis']
+            
+            # 获取成交量比率
+            volume_ratio = vol_analysis.get('volume_ratio', 1.0)
+            current_volume = vol_analysis.get('current_volume', 0)
+            avg_volume = vol_analysis.get('avg_volume', 0)
+            volume_trend = vol_analysis.get('volume_trend', 'unknown')
+            
+            # 格式化当前成交量描述
+            if volume_ratio < 0.5:
+                current_desc = f"萎缩({int(volume_ratio * 100)}%平均)"
+            elif volume_ratio > 1.5:
+                current_desc = f"放大({int(volume_ratio * 100)}%平均)"
+            else:
+                current_desc = f"正常({int(volume_ratio * 100)}%平均)"
+            
+            # 成交量趋势
+            if volume_trend == 'increasing':
+                trend_desc = "上升"
+            elif volume_trend == 'decreasing':
+                trend_desc = "下降"
+            else:
+                trend_desc = "稳定"
+            
+            # 价格相关性
+            price_correlation = vol_analysis.get('volume_price_correlation', 'neutral')
+            if price_correlation == 'positive':
+                correlation_desc = "正相关"
+            elif price_correlation == 'negative':
+                correlation_desc = "负相关"
+            else:
+                correlation_desc = "无明显相关"
+        else:
+            # 使用简化的成交量分析
+            volume = market_data.get('volume_24h', 0)
+            change = market_data.get('change_24h', 0)
+            
+            current_desc = "正常水平"
+            trend_desc = "稳定"
+            
+            # 简化的价格相关性判断
+            if volume > 1000000 and change > 2:
+                correlation_desc = "正相关"
+            elif volume > 1000000 and change < -2:
+                correlation_desc = "负相关"
+            else:
+                correlation_desc = "无明显相关"
+        
+        return {
+            "当前成交量": current_desc,
+            "趋势": trend_desc,
+            "价格相关性": correlation_desc
+        }
+    
+    def _analyze_volatility_integrated(self, market_data: Dict, kline_data: Dict = None) -> Dict:
+        """整合的波动率分析（ATR）"""
+        price = market_data.get('price', 0)
+        
+        # 优先使用K线数据的波动率指标
+        if kline_data and kline_data.get('technical_features', {}).get('volatility_indicators'):
+            vol_indicators = kline_data['technical_features']['volatility_indicators']
+            atr = vol_indicators.get('atr', 0)
+            atr_pct = vol_indicators.get('atr_pct', 0)
+            volatility_level = vol_indicators.get('volatility_level', 'medium')
+            
+            # 转换波动率水平为中文
+            if volatility_level == 'high':
+                level_desc = "高波动"
+            elif volatility_level == 'low':
+                level_desc = "低波动"
+            else:
+                level_desc = "中等波动"
+        else:
+            # 使用简化的波动率计算
+            high = market_data.get('high_24h', price)
+            low = market_data.get('low_24h', price)
+            
+            atr = high - low
+            atr_pct = (atr / price * 100) if price > 0 else 0
+            
+            if atr_pct > 5:
+                level_desc = "高波动"
+            elif atr_pct < 2:
+                level_desc = "低波动"
+            else:
+                level_desc = "中等波动"
+        
+        return {
+            "ATR": round(atr, 2),
+            "ATR百分比": f"{round(atr_pct, 2)}%",
+            "水平": level_desc
+        }
     
     def _calculate_rsi(self, price: float, change: float) -> float:
         """改进的RSI计算"""

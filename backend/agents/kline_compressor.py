@@ -46,12 +46,19 @@ class KlineCompressor:
             # 根据时间间隔选择压缩策略
             compression_ratio = self.compression_ratios.get(interval, 0.3)
             
+            # 生成摘要
+            summary = self._generate_summary(parsed_klines,interval)
+            
+            # 生成格式化的中文摘要
+            formatted_summary = self._format_chinese_summary(summary, interval)
+            
             # 关键特征提取
             compressed_data = {
                 'symbol': symbol,
                 'interval': interval,
                 'timestamp': parsed_klines[-1]['timestamp'] if parsed_klines else 0,
-                'summary': self._generate_summary(parsed_klines),
+                'summary': summary,
+                'formatted_summary': formatted_summary,  # 新增格式化摘要
                 'technical_features': self._extract_technical_features(parsed_klines),
                 'volume_analysis': self._analyze_volume_patterns(parsed_klines),
                 'price_action': self._analyze_price_action(parsed_klines),
@@ -61,6 +68,7 @@ class KlineCompressor:
             }
             
             logger.info(f"📊 K线数据压缩完成: {symbol} {interval}, 原始{len(raw_klines)}根 -> 特征{len(compressed_data)}维")
+            logger.info(f"\n{formatted_summary}")  # 输出格式化摘要到日志
             return compressed_data
             
         except Exception as e:
@@ -108,8 +116,8 @@ class KlineCompressor:
                 continue
         return parsed
     
-    def _generate_summary(self, klines: List[Dict]) -> Dict:
-        """生成K线数据摘要"""
+    def _generate_summary(self, klines: List[Dict],interval: str) -> Dict:
+        """生成K线数据摘要（扩展版，包含详细指标）"""
         if not klines:
             return {}
         
@@ -117,23 +125,62 @@ class KlineCompressor:
         volumes = [k['volume'] for k in klines]
         highs = [k['high'] for k in klines]
         lows = [k['low'] for k in klines]
+        opens = [k['open'] for k in klines]
         
         current_price = closes[-1]
         start_price = closes[0]
         price_change = current_price - start_price
         price_change_pct = (price_change / start_price) * 100 if start_price > 0 else 0
         
+        # 计算波动率
+        price_range = max(highs) - min(lows)
+        volatility = (price_range / start_price * 100) if start_price > 0 else 0
+        recent_24h = min(24, len(klines))
+        if interval == "15m":
+            recent_24h = min(96, len(klines))
+        elif interval == "1h":
+            recent_24h = min(24, len(klines))
+        elif interval == "4h":
+            recent_24h = min(6, len(klines))
+        elif interval == "1d":
+            recent_24h = min(1, len(klines))
+        else:
+            # 5分钟
+            recent_24h = min(24*12, len(klines))
+        # 最近24小时的高低点（假设1小时K线，取最近24根）
+        recent_high_24h = max(highs[-recent_24h:]) if recent_24h > 0 else current_price
+        recent_low_24h = min(lows[-recent_24h:]) if recent_24h > 0 else current_price
+        
+        # 计算成交量比率
+        avg_volume = np.mean(volumes) if volumes else 0
+        current_volume = volumes[-1] if volumes else 0
+        volume_ratio = (current_volume / avg_volume) if avg_volume > 0 else 1
+        
+        # 识别当前K线形态
+        last_candle = klines[-1]
+        candle_pattern = self._identify_current_candle_pattern(last_candle)
+        
+        # 寻找最近支撑阻力位
+        recent_support, recent_resistance = self._find_recent_support_resistance(klines)
+        
         return {
             'periods': len(klines),
-            'start_price': round(start_price, 6),
-            'end_price': round(current_price, 6),
-            'price_change': round(price_change, 6),
+            'start_price': round(start_price, 2),
+            'end_price': round(current_price, 2),
+            'price_change': round(price_change, 2),
             'price_change_pct': round(price_change_pct, 2),
-            'highest_price': round(max(highs), 6),
-            'lowest_price': round(min(lows), 6),
-            'avg_volume': round(np.mean(volumes), 2),
+            'highest_price': round(max(highs), 2),
+            'lowest_price': round(min(lows), 2),
+            'avg_volume': round(avg_volume, 2),
+            'current_volume': round(current_volume, 2),
             'total_volume': round(sum(volumes), 2),
-            'volatility': round((max(highs) - min(lows)) / start_price * 100, 2) if start_price > 0 else 0
+            'volatility': round(volatility, 2),
+            'volume_ratio': round(volume_ratio, 2),
+            'candle_pattern': candle_pattern,
+            'recent_support': round(recent_support, 2),
+            'recent_resistance': round(recent_resistance, 2),
+            'high_24h': round(recent_high_24h, 2),
+            'low_24h': round(recent_low_24h, 2),
         }
     
     def _extract_technical_features(self, klines: List[Dict]) -> Dict:
@@ -291,7 +338,7 @@ class KlineCompressor:
         return {
             'atr': round(atr, 6),
             'atr_pct': round(atr_pct, 2),
-            'volatility_level': 'high' if atr_pct > 5 else 'medium' if atr_pct > 2 else 'low'
+            'volatility_level': 'high' if atr_pct > 2.5 else 'medium' if atr_pct > 1.2 else 'low'
         }
     
     def _analyze_volume_patterns(self, klines: List[Dict]) -> Dict:
@@ -443,6 +490,76 @@ class KlineCompressor:
         
         return None
     
+    def _identify_current_candle_pattern(self, candle: Dict) -> str:
+        """识别当前K线形态"""
+        body = abs(candle['close'] - candle['open'])
+        total_range = candle['high'] - candle['low']
+        
+        if total_range == 0:
+            return "无明显形态"
+        
+        body_ratio = body / total_range
+        
+        # 十字星
+        if body_ratio < 0.1:
+            return "十字星 (潜在反转信号)"
+        
+        # 锤子/倒锤子
+        upper_wick = candle['high'] - max(candle['open'], candle['close'])
+        lower_wick = min(candle['open'], candle['close']) - candle['low']
+        
+        if lower_wick > body * 2 and upper_wick < body * 0.3:
+            return "锤子线 (看涨信号)"
+        if upper_wick > body * 2 and lower_wick < body * 0.3:
+            return "射击之星 (看跌信号)"
+        
+        # 长实体
+        if body_ratio > 0.7:
+            if candle['close'] > candle['open']:
+                return "长阳线 (强势上涨)"
+            else:
+                return "长阴线 (强势下跌)"
+        
+        # 普通实体
+        if candle['close'] > candle['open']:
+            return "阳线"
+        else:
+            return "阴线"
+    
+    def _find_recent_support_resistance(self, klines: List[Dict]) -> tuple:
+        """寻找最近的支撑和阻力位"""
+        if len(klines) < 10:
+            closes = [k['close'] for k in klines]
+            return min(closes), max(closes)
+        
+        # 使用最近20根K线寻找支撑阻力
+        recent_klines = klines[-20:]
+        highs = [k['high'] for k in recent_klines]
+        lows = [k['low'] for k in recent_klines]
+        
+        # 寻找局部高低点
+        support_levels = []
+        resistance_levels = []
+        
+        for i in range(1, len(recent_klines) - 1):
+            # 局部低点（支撑位）
+            if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
+                support_levels.append(lows[i])
+            
+            # 局部高点（阻力位）
+            if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
+                resistance_levels.append(highs[i])
+        
+        # 如果没有找到局部点，使用整体高低点
+        if not support_levels:
+            support_levels = [min(lows)]
+        if not resistance_levels:
+            resistance_levels = [max(highs)]
+        
+        # 返回最近的支撑和阻力
+        return max(support_levels), min(resistance_levels)
+
+    
     def _calculate_price_momentum(self, closes: List[float]) -> Dict:
         """计算价格动量"""
         if len(closes) < 10:
@@ -520,8 +637,8 @@ class KlineCompressor:
         closes = [k['close'] for k in klines]
         
         # 简单的支撑阻力识别
-        recent_high = max(highs[-20:])
-        recent_low = min(lows[-20:])
+        recent_high = max(highs[-24:])
+        recent_low = min(lows[-24:])
         current_price = closes[-1]
         
         # 计算动态支撑阻力
@@ -605,6 +722,89 @@ class KlineCompressor:
             })
         
         return compressed[-20:]  # 最多返回20根压缩后的K线
+    
+    def _format_chinese_summary(self, summary: Dict, interval: str) -> str:
+        """
+        格式化生成中文K线摘要
+        
+        Args:
+            summary: 摘要数据字典
+            interval: K线间隔
+            
+        Returns:
+            格式化的中文摘要字符串
+        """
+        if not summary:
+            return "无可用K线数据"
+        
+        # 时间周期映射
+        interval_map = {
+            '1m': '1分钟',
+            '5m': '5分钟',
+            '15m': '15分钟',
+            '1h': '1小时',
+            '4h': '4小时',
+            '1d': '1天'
+        }
+        interval_text = interval_map.get(interval, interval)
+        
+        # 计算分析周期（小时）
+        period_hours = summary.get('periods', 0)
+        if interval == '1h':
+            period_hours = period_hours
+        elif interval == '5m':
+            period_hours = period_hours * 5 / 60
+        elif interval == '15m':
+            period_hours = period_hours * 15 / 60
+        elif interval == '4h':
+            period_hours = period_hours * 4
+        elif interval == '1d':
+            period_hours = period_hours * 24
+        else:
+            period_hours = period_hours
+        
+        # 价格变化
+        start_price = summary.get('start_price', 0)
+        end_price = summary.get('end_price', 0)
+        price_change_pct = summary.get('price_change_pct', 0)
+        
+        # 波动率判断
+        volatility = summary.get('volatility', 0)
+        if volatility < 1.5:
+            volatility_text = "极低波动率"
+        elif volatility < 3:
+            volatility_text = "低波动率"
+        elif volatility < 6:
+            volatility_text = "中等波动率"
+        elif volatility < 10:
+            volatility_text = "高波动率"
+        else:
+            volatility_text = "极高波动率"
+        
+        # 成交量比率判断
+        volume_ratio = summary.get('volume_ratio', 1)
+        if volume_ratio < 0.5:
+            volume_text = f"萎缩至平均{int(volume_ratio * 100)}%"
+        elif volume_ratio > 1.5:
+            volume_text = f"放大至平均{int(volume_ratio * 100)}%"
+        else:
+            volume_text = "接近平均水平"
+        
+        # 格式化输出
+        formatted = f"""
+K线数据摘要 ({interval_text}):
+- 分析周期: {period_hours:.0f}小时
+- 价格变化: {price_change_pct:+.2f}% ({start_price:,.0f} → {end_price:,.0f})
+- 波动特征: {volatility_text} ({volatility:.2f}%)
+- 当前形态: {summary.get('candle_pattern', '未识别')}
+- 成交量: {volume_text} ({summary.get('current_volume', 0):.2f} vs {summary.get('avg_volume', 0):.2f})
+- 关键价位: 
+  * 最近支撑: {summary.get('recent_support', 0):,.2f}
+  * 最近阻力: {summary.get('recent_resistance', 0):,.2f}
+  * 24小时范围: {summary.get('low_24h', 0):,.0f} - {summary.get('high_24h', 0):,.0f}
+""".strip()
+        
+        return formatted
     
     def _empty_compression(self, symbol: str, interval: str) -> Dict:
         """空压缩结果"""

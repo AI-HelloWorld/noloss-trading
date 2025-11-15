@@ -392,6 +392,107 @@ class MockMarketDataGenerator:
         """获取支持的交易对列表"""
         # 返回BTCUSDT格式的交易对，与交易引擎期望的格式一致
         return [symbol.replace("/", "") for symbol in self.base_prices.keys()]
+    
+    def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> List[Dict]:
+        """
+        获取K线数据（模拟）
+        
+        Args:
+            symbol: 交易对（支持BTC/USDT或BTCUSDT格式）
+            interval: 时间间隔（1m, 5m, 15m, 1h, 4h, 1d）
+            limit: 返回的K线数量
+            
+        Returns:
+            K线数据字典数组，格式：[{timestamp, open, high, low, close, volume, ...}, ...]
+        """
+        # 标准化交易对格式
+        normalized_symbol = self._normalize_symbol(symbol)
+        
+        if normalized_symbol not in self.current_prices:
+            logger.warning(f"不支持的交易对: {symbol}")
+            return []
+        
+        # 获取当前价格作为基准
+        current_price = self.current_prices[normalized_symbol]
+        
+        # 时间间隔转换为秒
+        interval_seconds = {
+            '1m': 60,
+            '5m': 300,
+            '15m': 900,
+            '1h': 3600,
+            '4h': 14400,
+            '1d': 86400
+        }.get(interval, 3600)
+        
+        # 生成模拟K线数据
+        klines = []
+        current_time = int(time.time() * 1000)  # 当前时间（毫秒）
+        
+        # 从历史往当前生成
+        for i in range(limit, 0, -1):
+            # 计算这根K线的时间戳
+            timestamp = current_time - (i * interval_seconds * 1000)
+            close_time = timestamp + interval_seconds * 1000
+            
+            # 生成价格（基于趋势和随机波动）
+            trend = self.trends.get(normalized_symbol, {"type": "sideways", "strength": 0.5})
+            
+            # 开盘价：基于当前价格和距离当前时间的远近
+            time_factor = i / limit  # 1.0 (最早) -> 0 (最新)
+            
+            if trend["type"] == "bull":
+                # 上涨趋势：历史价格更低
+                open_price = current_price * (0.85 + 0.15 * (1 - time_factor))
+            elif trend["type"] == "bear":
+                # 下跌趋势：历史价格更高
+                open_price = current_price * (1.15 - 0.15 * (1 - time_factor))
+            else:
+                # 横盘：价格在当前价格附近波动
+                open_price = current_price * (0.98 + 0.04 * random.random())
+            
+            # 添加随机波动
+            volatility = 0.02 * trend["strength"]
+            open_price *= (1 + random.uniform(-volatility, volatility))
+            
+            # 高低价和收盘价
+            high = open_price * random.uniform(1.001, 1.015)
+            low = open_price * random.uniform(0.985, 0.999)
+            close = random.uniform(low, high)
+            
+            # 成交量（随机）
+            base_volume = 100 + random.uniform(0, 200)
+            volume = base_volume * (1 + random.uniform(-0.5, 0.5))
+            quote_volume = volume * close
+            
+            # K线数据格式（字典格式）
+            kline = {
+                'timestamp': timestamp,
+                'open': open_price,
+                'high': high,
+                'low': low,
+                'close': close,
+                'volume': volume,
+                'close_time': close_time,
+                'quote_volume': quote_volume,
+                'trades': random.randint(100, 500),
+                'taker_buy_volume': volume * 0.6,
+                'taker_buy_quote_volume': quote_volume * 0.6
+            }
+            
+            klines.append(kline)
+        
+        # 确保最后一根K线接近当前价格
+        if klines:
+            last_kline = klines[-1]
+            last_kline['close'] = current_price  # 收盘价 = 当前价格
+            last_kline['high'] = max(last_kline['open'], current_price * 1.005)  # 最高价
+            last_kline['low'] = min(last_kline['open'], current_price * 0.995)  # 最低价
+            last_kline['quote_volume'] = last_kline['volume'] * current_price
+            last_kline['taker_buy_quote_volume'] = last_kline['taker_buy_volume'] * current_price
+        
+        logger.info(f"📊 生成模拟K线数据: {symbol} {interval} x{len(klines)}")
+        return klines
 
 
 # 全局模拟市场数据生成器实例

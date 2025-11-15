@@ -23,7 +23,7 @@ const PositionsTable = ({ positions }) => {
       <h3 className="text-2xl font-display font-bold gold-text mb-6">{t('portfolio.currentPositions')}</h3>
       <div className="overflow-x-auto">
         <table className="min-w-full">
-          <thead className="bg-dark-100 border-b-2 border-gold-400/50">
+          <thead className="bg-gradient-to-r from-dark-100 to-dark-100/80 border-b-2 border-gold-400/50">
             <tr>
               <th className="px-6 py-4 text-left text-xs font-bold text-gold-400 uppercase tracking-wider">
                 {t('portfolio.symbol')}

@@ -12,7 +12,7 @@ class AdvancedTradingStrategy:
     def __init__(self):
         # 设置参数阈值
         self.min_confidence = 0.65            # 执行交易的最低置信度门槛
-        self.base_position_pct = 0.10         # 基础仓位比例（每笔交易占用资金比例，10%）
+        self.base_position_pct = 0.20         # 基础仓位比例（每笔交易占用资金比例，10%）
         self.max_leverage = 3                 # 最大杠杆倍数
         self.min_margin_ratio = 0.5           # 最低保证金充足率（50%可用资金保底）
 

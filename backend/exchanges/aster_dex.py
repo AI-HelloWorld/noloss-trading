@@ -28,15 +28,17 @@ class AsterDEXClient:
         self.api_secret = settings.aster_dex_api_secret  # API Secret
         self.base_url = "https://fapi.asterdex.com"  # Futures API
         self.position_mode_initialized = False  # 持仓模式初始化标志
+        self.time_offset = 0  # 服务器时间偏移量
         
         # 检查配置
         if self.api_key and self.api_secret:
             self.use_mock_data = False
-            # 初始化官方SDK客户端
+            # 初始化官方SDK客户端，增加recvWindow配置
             self.client = AsterClient(
                 key=self.api_key,
                 secret=self.api_secret,
-                base_url=self.base_url
+                base_url=self.base_url,
+                timeout=60000  # 增加超时时间到60秒
             )
             logger.info(f"✅ AsterDEX官方SDK客户端初始化成功")
             logger.info(f"🔗 Base URL: {self.base_url}")
@@ -44,6 +46,12 @@ class AsterDEXClient:
             logger.info(f"🔐 API Secret: {'*' * 20}")
             if self.user:
                 logger.info(f"💳 钱包地址: {self.user[:6]}...{self.user[-4:]}")
+            
+            # 同步服务器时间
+            try:
+                self._sync_server_time()
+            except Exception as e:
+                logger.warning(f"⚠️ 同步服务器时间失败: {e}，将使用本地时间")
         else:
             self.use_mock_data = True
             self.client = None
@@ -67,6 +75,26 @@ class AsterDEXClient:
             # 如果没有事件循环，创建新的
             return asyncio.run(asyncio.to_thread(lambda: coro))
     
+    def _sync_server_time(self):
+        """同步服务器时间，计算时间偏移量"""
+        try:
+            # 获取服务器时间
+            server_time_response = self.client.time()
+            if isinstance(server_time_response, dict) and 'serverTime' in server_time_response:
+                server_time = server_time_response['serverTime']
+                local_time = int(time.time() * 1000)
+                self.time_offset = server_time - local_time
+                logger.info(f"⏰ 时间同步完成: 服务器时间偏移 {self.time_offset}ms")
+            else:
+                logger.warning(f"⚠️ 无法获取服务器时间: {server_time_response}")
+        except Exception as e:
+            logger.warning(f"⚠️ 同步服务器时间失败: {e}")
+            self.time_offset = 0
+    
+    def _get_timestamp(self):
+        """获取带偏移量的时间戳"""
+        return int(time.time() * 1000) + self.time_offset
+    
     def _format_symbol_for_mock(self, symbol: str) -> str:
         """将symbol格式从BTCUSDT转换为BTC/USDT以匹配mock数据"""
         if "/" in symbol:
@@ -83,7 +111,6 @@ class AsterDEXClient:
             return mock_market.get_account_balance()
         
         try:
-            logger.info(f"💰 真实模式：使用官方SDK查询AsterDEX账户余额")
             
             # 在线程池中运行同步SDK调用
             def get_balance():
@@ -113,9 +140,6 @@ class AsterDEXClient:
             if isinstance(result, dict) and 'assets' in result:
                 # Futures API格式：返回assets字段
                 assets = result['assets']
-                logger.info(f"✅ 成功获取账户信息！")
-                logger.info(f"   共{len(assets)}项资产")
-                logger.info(f"   可交易: {result.get('canTrade', False)}")
                 
                 # 转换为标准格式
                 balances = []
@@ -134,7 +158,6 @@ class AsterDEXClient:
                     wallet = float(usdt_asset.get('walletBalance', 0))
                     available = float(usdt_asset.get('availableBalance', 0))
                     locked = wallet - available
-                    logger.info(f"💵 USDT余额: 可用={available:.2f}, 锁定={locked:.2f}, 总计={wallet:.2f}")
                 
                 return {
                     "success": True,
@@ -144,9 +167,6 @@ class AsterDEXClient:
             elif isinstance(result, dict) and 'balances' in result:
                 # Spot API格式：返回balances字段
                 balances = result['balances']
-                logger.info(f"✅ 成功获取账户信息！")
-                logger.info(f"   共{len(balances)}项资产")
-                logger.info(f"   可交易: {result.get('canTrade', False)}")
                 
                 # 显示USDT余额
                 usdt_balance = next((b for b in balances if b.get('asset') == 'USDT'), None)
@@ -506,11 +526,10 @@ class AsterDEXClient:
             elif isinstance(result, dict) and 'code' in result:
                 error_code = result.get('code')
                 error_msg = result.get('msg', '未知错误')
-                error_code = result.get('code', '')
                 logger.error(f"❌ 做空失败 [{error_code}]: {error_msg}")
                 
                 # 如果是持仓模式不匹配错误，尝试另一种方式
-                if 'position side' in error_msg.lower() and not is_hedge_mode:
+                if 'position side' in error_msg.lower():
                     logger.warning("⚠️  检测到持仓模式不匹配，尝试使用双向模式参数...")
                     params["positionSide"] = "SHORT"
                     
@@ -551,35 +570,79 @@ class AsterDEXClient:
             return {"success": False, "error": f"{type(e).__name__}: {str(e)}"}
     
     async def close_position(self, symbol: str) -> Dict:
-        """平仓 - 使用官方SDK"""
+        """平仓 - 使用官方SDK或手动平仓"""
         if self.use_mock_data:
             return mock_market.close_position(symbol)
         
         try:
             logger.info(f"📤 提交平仓请求: {symbol}")
             
-            # 在线程池中运行同步SDK调用
-            # 注意：官方SDK可能使用 close_position 或其他方法
-            def submit_close():
-                # 尝试使用SDK的平仓方法，如果没有则使用市价单平仓
-                if hasattr(self.client, 'close_position'):
+            # 检查SDK是否有close_position方法
+            if hasattr(self.client, 'close_position'):
+                def submit_close():
                     return self.client.close_position(symbol=symbol)
+                
+                result = await asyncio.to_thread(submit_close)
+                
+                if isinstance(result, dict) and result.get('success') is not False:
+                    logger.info(f"✅ 平仓成功: {symbol}")
+                    return {"success": True, **result}
                 else:
-                    # 备选方案：使用市价单平仓（需要先获取持仓方向和数量）
-                    logger.warning("⚠️  SDK没有close_position方法，需要手动平仓")
-                    return {"success": False, "error": "需要手动平仓"}
-            
-            result = await asyncio.to_thread(submit_close)
-            
-            if isinstance(result, dict) and result.get('success') is not False:
-                logger.info(f"✅ 平仓成功: {symbol}")
-                return {"success": True, **result}
+                    error_msg = result.get('error', '未知错误')
+                    logger.error(f"❌ 平仓失败: {error_msg}")
+                    return {"success": False, "error": error_msg}
             else:
-                error_msg = result.get('error', '未知错误')
-                logger.error(f"❌ 平仓失败: {error_msg}")
-                return {"success": False, "error": error_msg}
+                # SDK没有close_position方法，使用手动平仓方案
+                logger.info("ℹ️  SDK没有close_position方法，使用手动平仓")
+                
+                # 1. 获取当前持仓
+                positions = await self.get_open_positions(symbol=symbol)
+                
+                # 2. 找到对应symbol的持仓
+                target_position = None
+                for pos in positions:
+                    if pos.get('symbol') == symbol:
+                        target_position = pos
+                        break
+                
+                if not target_position:
+                    logger.warning(f"⚠️  未找到持仓: {symbol}")
+                    return {"success": False, "error": f"未找到持仓: {symbol}"}
+                
+                # 3. 确定平仓方向和数量
+                position_type = target_position.get('position_type')
+                position_amount = target_position.get('amount', 0)
+                
+                if position_amount == 0:
+                    logger.warning(f"⚠️  持仓数量为0: {symbol}")
+                    return {"success": False, "error": f"持仓数量为0: {symbol}"}
+                
+                # 多仓用SELL平仓，空仓用BUY平仓
+                close_side = "SELL" if position_type == "long" else "BUY"
+                
+                logger.info(f"📊 持仓信息: {position_type} {position_amount} {symbol}")
+                logger.info(f"📤 执行平仓: {close_side} {position_amount} {symbol}")
+                
+                # 4. 使用市价单平仓
+                result = await self.place_order(
+                    symbol=symbol,
+                    side=close_side.lower(),
+                    order_type="market",
+                    amount=position_amount
+                )
+                
+                if result.get('success'):
+                    logger.info(f"✅ 平仓成功: {symbol}")
+                    return {"success": True, "order_id": result.get('order_id'), "position_type": position_type}
+                else:
+                    error_msg = result.get('error', '未知错误')
+                    logger.error(f"❌ 平仓失败: {error_msg}")
+                    return {"success": False, "error": error_msg}
+                
         except Exception as e:
             logger.error(f"❌ 平仓异常: {e}")
+            import traceback
+            logger.error(f"   堆栈: {traceback.format_exc()}")
             return {"success": False, "error": str(e)}
     
     async def get_order_status(self, order_id: str) -> Dict:
@@ -606,18 +669,17 @@ class AsterDEXClient:
             logger.error(f"❌ 查询订单失败: {e}")
             return {"success": False, "error": str(e)}
     
-    async def get_open_positions(self) -> List[Dict]:
+    async def get_open_positions(self, symbol: str = None) -> List[Dict]:
         """获取当前持仓 - 使用官方SDK"""
         if self.use_mock_data:
             return mock_market.get_open_positions()
         
         try:
-            logger.info(f"📊 查询持仓信息（使用官方SDK）")
             
             # 在线程池中运行同步SDK调用
             def get_positions():
                 # 根据官方SDK文档，使用get_position_risk()获取持仓风险信息
-                return self.client.get_position_risk()
+                return self.client.get_position_risk(symbol=symbol)
             
             result = await asyncio.to_thread(get_positions)
             
@@ -636,19 +698,22 @@ class AsterDEXClient:
                     pos_amt = float(pos.get('positionAmt', 0))
                     if pos_amt != 0:
                         # 转换为我们的标准格式
+                        entry_price_value = float(pos.get('entryPrice', 0))
                         positions_data.append({
                             "symbol": pos.get('symbol'),
                             "amount": abs(pos_amt),
-                            "average_price": float(pos.get('entryPrice', 0)),
+                            "average_price": entry_price_value,
+                            "entry_price": entry_price_value,  # 记录入场价格
                             "current_price": float(pos.get('markPrice', 0)),
                             "unrealized_pnl": float(pos.get('unRealizedProfit', 0)),
-                            "position_type": "short" if pos_amt < 0 else "long"
+                            "position_type": "short" if pos_amt < 0 else "long",
+                            "total_value": entry_price_value * float(pos.get('positionAmt', 0))
                         })
                 
                 if positions_data:
                     logger.info(f"✅ 获取到{len(positions_data)}个持仓")
                     for pos in positions_data:
-                        logger.info(f"   {pos['symbol']}: {pos['amount']:.6f} @ ${pos['average_price']:.2f} (未实现盈亏: ${pos['unrealized_pnl']:.2f})")
+                        logger.info(f"   {pos['symbol']}: {pos['amount']:.4f} @ ${pos['average_price']:.2f} (未实现盈亏: ${pos['unrealized_pnl']:.2f})")
                 else:
                     logger.info("ℹ️  当前无持仓")
                 
@@ -702,7 +767,7 @@ class AsterDEXClient:
             
             # exchangeInfo 返回的 symbols 数组包含详细信息
             if 'symbols' in result:
-                return [s['symbol'] for s in result['symbols'] if s.get('status') == 'TRADING']
+                return [s for s in result['symbols'] if s.get('status') == 'TRADING']
             return result.get('symbols', [])
         except Exception as e:
             logger.error(f"获取交易对列表失败: {e}")
@@ -712,6 +777,165 @@ class AsterDEXClient:
                 "XRP/USDT", "DOT/USDT", "DOGE/USDT", "MATIC/USDT", "AVAX/USDT",
                 "LINK/USDT", "UNI/USDT", "ATOM/USDT", "LTC/USDT", "ETC/USDT"
             ]
+    
+    async def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> List[Dict]:
+        """
+        获取K线数据 - 使用官方SDK
+        
+        Args:
+            symbol: 交易对（如BTCUSDT）
+            interval: 时间间隔（1m, 5m, 15m, 1h, 4h, 1d）
+            limit: 返回的K线数量（默认100，最大1500）
+            
+        Returns:
+            K线数据字典数组，格式：[{timestamp, open, high, low, close, volume, ...}, ...]
+        """
+        if self.use_mock_data:
+            logger.debug(f"📊 模拟模式：生成K线数据 {symbol} {interval} x{limit}")
+            return mock_market.get_klines(symbol, interval, limit)
+        
+        try:
+            logger.info(f"📊 真实模式：使用官方SDK获取K线数据 {symbol} {interval} x{limit}")
+            
+            # 在线程池中运行同步SDK调用
+            def get_kline_data():
+                # 根据官方SDK文档，使用klines()方法获取K线数据
+                # 参数：symbol, interval, limit
+                return self.client.klines(symbol=symbol, interval=interval, limit=limit)
+            
+            result = await asyncio.to_thread(get_kline_data)
+            
+            # 检查API是否返回错误
+            if isinstance(result, dict) and 'code' in result:
+                error_code = result.get('code')
+                error_msg = result.get('msg', '未知错误')
+                logger.error(f"❌ AsterDEX API错误: [{error_code}] {error_msg}")
+                logger.warning(f"⚠️  使用模拟数据作为后备")
+                return mock_market.get_klines(symbol, interval, limit)
+            
+            # 检查返回的数据格式并转换为字典格式
+            if isinstance(result, list) and len(result) > 0:
+                logger.info(f"✅ 成功获取K线数据: {symbol} {interval} x{len(result)}")
+                
+                # 将列表格式转换为字典格式
+                klines_dict = []
+                for kline in result:
+                    if isinstance(kline, list) and len(kline) >= 6:
+                        # Binance/AsterDEX 标准格式：
+                        # [timestamp, open, high, low, close, volume, close_time, quote_volume, trades, taker_buy_volume, taker_buy_quote_volume, ignore]
+                        klines_dict.append({
+                            'timestamp': kline[0],
+                            'open': float(kline[1]),
+                            'high': float(kline[2]),
+                            'low': float(kline[3]),
+                            'close': float(kline[4]),
+                            'volume': float(kline[5]),
+                            'close_time': kline[6] if len(kline) > 6 else 0,
+                            'quote_volume': float(kline[7]) if len(kline) > 7 else 0.0,
+                            'trades': int(kline[8]) if len(kline) > 8 else 0,
+                            'taker_buy_volume': float(kline[9]) if len(kline) > 9 else 0.0,
+                            'taker_buy_quote_volume': float(kline[10]) if len(kline) > 10 else 0.0
+                        })
+                    elif isinstance(kline, dict):
+                        # 已经是字典格式，直接使用
+                        klines_dict.append(kline)
+                
+                return klines_dict
+            else:
+                logger.warning(f"⚠️  K线数据为空或格式异常，使用模拟数据")
+                return mock_market.get_klines(symbol, interval, limit)
+                
+        except ClientError as e:
+            logger.error(f"❌ 客户端错误: {e.error_message if hasattr(e, 'error_message') else e}")
+            logger.warning(f"⚠️  使用模拟数据作为后备")
+            return mock_market.get_klines(symbol, interval, limit)
+        except ServerError as e:
+            logger.error(f"❌ 服务器错误: {e}")
+            logger.warning(f"⚠️  使用模拟数据作为后备")
+            return mock_market.get_klines(symbol, interval, limit)
+        except Exception as e:
+            logger.error(f"❌ 获取K线数据失败: {e}")
+            logger.warning(f"⚠️  使用模拟数据作为后备")
+            return mock_market.get_klines(symbol, interval, limit)
+    
+    async def get_commission_rate(self, symbol: str) -> Dict:
+        """
+        获取交易对手续费率 - 使用官方SDK
+        
+        Args:
+            symbol: 交易对（如BTCUSDT）
+            
+        Returns:
+            手续费率信息字典，格式：{
+                "symbol": "BTCUSDT",
+                "makerCommissionRate": "0.0002",
+                "takerCommissionRate": "0.0004"
+            }
+        """
+        if self.use_mock_data:
+            logger.debug(f"📊 模拟模式：返回默认手续费率 {symbol}")
+            return {
+                "symbol": symbol,
+                "makerCommissionRate": "0.0002",
+                "takerCommissionRate": "0.0004"
+            }
+        
+        try:
+            logger.info(f"📊 获取手续费率: {symbol}")
+            
+            # 在线程池中运行同步SDK调用
+            def get_commission():
+                return self.client.commission_rate(symbol=symbol)
+            
+            result = await asyncio.to_thread(get_commission)
+            
+            # 检查API是否返回错误
+            if isinstance(result, dict) and 'code' in result:
+                error_code = result.get('code')
+                error_msg = result.get('msg', '未知错误')
+                logger.error(f"❌ 获取手续费率错误: [{error_code}] {error_msg}")
+                # 返回默认值
+                return {
+                    "symbol": symbol,
+                    "makerCommissionRate": "0.0002",
+                    "takerCommissionRate": "0.0004"
+                }
+            
+            # 返回手续费率信息
+            if isinstance(result, dict):
+                logger.info(f"✅ 成功获取手续费率: {symbol}")
+                logger.debug(f"   Maker: {result.get('makerCommissionRate', 'N/A')}")
+                logger.debug(f"   Taker: {result.get('takerCommissionRate', 'N/A')}")
+                return result
+            else:
+                logger.warning(f"⚠️  手续费率响应格式异常，使用默认值")
+                return {
+                    "symbol": symbol,
+                    "makerCommissionRate": "0.0002",
+                    "takerCommissionRate": "0.0004"
+                }
+                
+        except ClientError as e:
+            logger.error(f"❌ 客户端错误: {e.error_message if hasattr(e, 'error_message') else e}")
+            return {
+                "symbol": symbol,
+                "makerCommissionRate": "0.0002",
+                "takerCommissionRate": "0.0004"
+            }
+        except ServerError as e:
+            logger.error(f"❌ 服务器错误: {e}")
+            return {
+                "symbol": symbol,
+                "makerCommissionRate": "0.0002",
+                "takerCommissionRate": "0.0004"
+            }
+        except Exception as e:
+            logger.error(f"❌ 获取手续费率失败: {e}")
+            return {
+                "symbol": symbol,
+                "makerCommissionRate": "0.0002",
+                "takerCommissionRate": "0.0004"
+            }
     
     async def close(self):
         """关闭连接"""

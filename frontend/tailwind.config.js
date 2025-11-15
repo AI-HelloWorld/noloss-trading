@@ -9,31 +9,31 @@ export default {
       colors: {
         // Black & Gold Theme - Professional Trading Platform
         gold: {
-          50: '#fffbeb',
-          100: '#fef3c7',
-          200: '#fde68a',
-          300: '#fcd34d',
-          400: '#fbbf24',
-          500: '#f59e0b',
-          600: '#d97706',
-          700: '#b45309',
-          800: '#92400e',
-          900: '#78350f',
+          50: '#fffef5',
+          100: '#fffde8',
+          200: '#fef9c3',
+          300: '#fdf088',
+          400: '#fcd535',  // Binance primary gold
+          500: '#f0b90b',  // Binance secondary gold
+          600: '#d4a017',
+          700: '#b8870f',
+          800: '#9a720c',
+          900: '#7d5d09',
         },
         dark: {
-          50: '#18181b',
-          100: '#27272a',
-          200: '#3f3f46',
-          300: '#52525b',
-          400: '#71717a',
-          500: '#a1a1aa',
-          600: '#d4d4d8',
-          700: '#e4e4e7',
-          800: '#f4f4f5',
-          900: '#fafafa',
+          50: '#1e2329',  // Binance dark background
+          100: '#2b3139', // Binance card background
+          200: '#474d57',
+          300: '#5e6673',
+          400: '#848e9c',
+          500: '#a1aab8',
+          600: '#b7bdc8',
+          700: '#eaecef', // Binance text
+          800: '#f0f1f2',
+          900: '#ffffff',
         },
-        primary: '#fbbf24',    // Gold
-        secondary: '#0a0a0a',  // Deep Black
+        primary: '#fcd535',    // Binance Gold
+        secondary: '#1e2329',  // Binance Dark
         success: '#10b981',    // Green
         danger: '#ef4444',     // Red
         warning: '#f59e0b',    // Amber

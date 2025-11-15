@@ -2,7 +2,7 @@
 止盈止损决策系统 - 由AI团队协同决策
 """
 from typing import Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from enum import Enum
 from loguru import logger
 
@@ -269,14 +269,21 @@ class StopLossDecisionSystem:
             logger.error(f"提取止盈止损意见失败: {e}")
             return None
     
-    def make_stop_decision(
+    async def make_stop_decision(
         self,
         position_id: str,
         opinions: List[StopLossOpinion],
-        market_data: Dict
+        market_data: Dict,
+        portfolio_manager=None  # 新增：投资组合经理实例
     ) -> Dict:
         """
-        综合所有AI意见，做出最终止盈止损决策（由投资组合经理决定）
+        综合所有AI意见，再次调用大模型做出最终止盈止损决策
+        
+        工作流程：
+        1. 收集各个agent的意见和投票
+        2. 统计团队共识
+        3. 将所有意见汇总后，调用投资组合经理大模型做最终决策
+        4. 返回最终决策结果
         
         Returns:
             {
@@ -287,7 +294,8 @@ class StopLossDecisionSystem:
                 'suggested_stop_loss': float,
                 'suggested_take_profit': float,
                 'team_votes': Dict,
-                'urgency': float
+                'urgency': float,
+                'ai_final_reasoning': str  # AI大模型的最终推理
             }
         """
         if position_id not in self.active_positions:
@@ -295,16 +303,30 @@ class StopLossDecisionSystem:
         
         position = self.active_positions[position_id]
         
-        # 统计各种意见
+        # ===== 第一步：统计各个agent的意见 =====
         vote_counts = {action: 0 for action in StopActionType}
         total_confidence = 0
         total_urgency = 0
         risk_manager_opinion = None
+        opinion_details = []
         
         for opinion in opinions:
             vote_counts[opinion.action] += 1
             total_confidence += opinion.confidence
             total_urgency += opinion.urgency
+            
+            # 记录详细意见用于AI决策
+            opinion_details.append({
+                'agent': opinion.agent_name,
+                'role': opinion.agent_role,
+                'action': opinion.action.value,
+                'confidence': opinion.confidence,
+                'urgency': opinion.urgency,
+                'reasoning': opinion.reasoning,
+                'risk_assessment': opinion.risk_assessment,
+                'suggested_stop_loss': opinion.suggested_stop_loss,
+                'suggested_take_profit': opinion.suggested_take_profit
+            })
             
             # 风险管理经理的意见权重最高
             if 'risk' in opinion.agent_role.lower():
@@ -313,7 +335,154 @@ class StopLossDecisionSystem:
         avg_confidence = total_confidence / len(opinions) if opinions else 0
         avg_urgency = total_urgency / len(opinions) if opinions else 0
         
-        # 决策逻辑（投资组合经理综合判断）
+        # ===== 第二步：检查自动触发条件 =====
+        current_price = market_data.get('price', position.get('current_price', 0))
+        auto_trigger_detected = False
+        auto_trigger_action = None
+        auto_trigger_reason = ""
+        
+        # 检查固定止损止盈
+        if position['action'] == 'buy':
+            if current_price <= position['stop_loss']:
+                auto_trigger_detected = True
+                auto_trigger_action = StopActionType.STOP_LOSS
+                auto_trigger_reason = f"固定止损触发: ${current_price:.2f} <= ${position['stop_loss']:.2f}"
+            elif current_price >= position['take_profit']:
+                auto_trigger_detected = True
+                auto_trigger_action = StopActionType.TAKE_PROFIT
+                auto_trigger_reason = f"固定止盈触发: ${current_price:.2f} >= ${position['take_profit']:.2f}"
+        else:  # short
+            if current_price >= position['stop_loss']:
+                auto_trigger_detected = True
+                auto_trigger_action = StopActionType.STOP_LOSS
+                auto_trigger_reason = f"固定止损触发: ${current_price:.2f} >= ${position['stop_loss']:.2f}"
+            elif current_price <= position['take_profit']:
+                auto_trigger_detected = True
+                auto_trigger_action = StopActionType.TAKE_PROFIT
+                auto_trigger_reason = f"固定止盈触发: ${current_price:.2f} <= ${position['take_profit']:.2f}"
+        
+        # 检查移动止损
+        if not auto_trigger_detected:
+            trailing_stop = self.stop_strategy.calculate_trailing_stop(
+                position['action'],
+                position['entry_price'],
+                current_price,
+                position['highest_price'],
+                position['lowest_price']
+            )
+            
+            if position['action'] == 'buy' and current_price <= trailing_stop:
+                auto_trigger_detected = True
+                auto_trigger_action = StopActionType.TRAILING_STOP
+                auto_trigger_reason = f"移动止损触发: ${current_price:.2f} <= ${trailing_stop:.2f}"
+            elif position['action'] == 'short' and current_price >= trailing_stop:
+                auto_trigger_detected = True
+                auto_trigger_action = StopActionType.TRAILING_STOP
+                auto_trigger_reason = f"移动止损触发: ${current_price:.2f} >= ${trailing_stop:.2f}"
+        
+        # 如果有自动触发条件，直接执行，不需要AI决策
+        if auto_trigger_detected:
+            logger.warning(f"🚨 {auto_trigger_reason} - 立即执行")
+            team_votes_summary = ", ".join([
+                f"{action.value}({count}票)" 
+                for action, count in vote_counts.items() if count > 0
+            ])
+            
+            return {
+                'final_decision': 'execute',
+                'action': auto_trigger_action,
+                'confidence': 1.0,
+                'reasoning': f"{auto_trigger_reason} | 团队投票: {team_votes_summary}",
+                'suggested_stop_loss': position['stop_loss'],
+                'suggested_take_profit': position['take_profit'],
+                'trailing_stop': trailing_stop if 'trailing_stop' in locals() else 0,
+                'team_votes': vote_counts,
+                'urgency': 1.0,
+                'position_pnl': position.get('pnl', 0),
+                'position_pnl_pct': position.get('pnl_pct', 0),
+                'ai_final_reasoning': '自动触发条件满足，无需AI决策'
+            }
+        
+        # ===== 第三步：如果没有自动触发，调用投资组合经理大模型做最终决策 =====
+        if portfolio_manager:
+            try:
+                logger.info(f"🤖 调用投资组合经理大模型做最终止盈止损决策...")
+                
+                # 构建给AI的决策上下文
+                decision_context = {
+                    'position_info': {
+                        'symbol': position['symbol'],
+                        'action': position['action'],
+                        'entry_price': position['entry_price'],
+                        'current_price': current_price,
+                        'quantity': position['quantity'],
+                        'pnl': position.get('pnl', 0),
+                        'pnl_pct': position.get('pnl_pct', 0),
+                        'stop_loss': position['stop_loss'],
+                        'take_profit': position['take_profit'],
+                        'highest_price': position['highest_price'],
+                        'lowest_price': position['lowest_price']
+                    },
+                    'market_data': market_data,
+                    'team_opinions': opinion_details,
+                    'team_consensus': {
+                        'vote_counts': {action.value: count for action, count in vote_counts.items()},
+                        'avg_confidence': avg_confidence,
+                        'avg_urgency': avg_urgency,
+                        'risk_manager_opinion': {
+                            'action': risk_manager_opinion.action.value,
+                            'urgency': risk_manager_opinion.urgency,
+                            'reasoning': risk_manager_opinion.reasoning
+                        } if risk_manager_opinion else None
+                    }
+                }
+                
+                # 调用投资组合经理进行最终决策
+                ai_decision = await portfolio_manager.make_final_stop_decision(decision_context)
+                
+                # 解析AI的决策
+                final_action_str = ai_decision.get('action', 'hold')
+                final_decision = ai_decision.get('final_decision', 'hold')
+                ai_confidence = ai_decision.get('confidence', avg_confidence)
+                ai_reasoning = ai_decision.get('reasoning', '')
+                
+                # 转换action字符串到枚举
+                try:
+                    final_action = StopActionType(final_action_str)
+                except ValueError:
+                    final_action = StopActionType.HOLD
+                
+                logger.info(f"{'✅ AI决定执行' if final_decision == 'execute' else '⏸️  AI建议继续持仓'} "
+                           f"{position_id}: {final_action.value}")
+                logger.info(f"   AI推理: {ai_reasoning}")
+                
+                team_votes_summary = ", ".join([
+                    f"{action.value}({count}票)" 
+                    for action, count in vote_counts.items() if count > 0
+                ])
+                
+                return {
+                    'final_decision': final_decision,
+                    'action': final_action,
+                    'confidence': ai_confidence,
+                    'reasoning': f"AI最终决策: {ai_reasoning} | 团队投票: {team_votes_summary}",
+                    'suggested_stop_loss': ai_decision.get('suggested_stop_loss', position['stop_loss']),
+                    'suggested_take_profit': ai_decision.get('suggested_take_profit', position['take_profit']),
+                    'trailing_stop': trailing_stop if 'trailing_stop' in locals() else 0,
+                    'team_votes': vote_counts,
+                    'urgency': ai_decision.get('urgency', avg_urgency),
+                    'position_pnl': position.get('pnl', 0),
+                    'position_pnl_pct': position.get('pnl_pct', 0),
+                    'ai_final_reasoning': ai_reasoning
+                }
+                
+            except Exception as e:
+                logger.error(f"调用投资组合经理AI决策失败: {e}，回退到规则决策")
+                # 如果AI决策失败，回退到原有的规则决策
+        
+        # ===== 第四步：回退方案 - 基于规则的决策 =====
+        logger.info("使用基于规则的决策系统...")
+        
         final_action = StopActionType.HOLD
         final_decision = 'hold'
         reasoning_parts = []
@@ -329,10 +498,6 @@ class StopLossDecisionSystem:
         # 2. 如果风险经理没有强制要求，看团队共识
         if final_decision == 'hold':
             # 找出票数最多的操作
-            max_votes = max(vote_counts.values())
-            consensus_actions = [action for action, votes in vote_counts.items() if votes == max_votes]
-            
-            # 如果有明确共识（超过50%支持）
             consensus_threshold = len(opinions) * 0.5
             
             for action, votes in vote_counts.items():
@@ -350,55 +515,13 @@ class StopLossDecisionSystem:
                         )
                     break
         
-        # 3. 自动触发条件（六种止盈止损方式）
-        current_price = market_data.get('price', position.get('current_price', 0))
-        
-        # 检查固定止损止盈
-        if position['action'] == 'buy':
-            if current_price <= position['stop_loss']:
-                final_action = StopActionType.STOP_LOSS
-                final_decision = 'execute'
-                reasoning_parts.append(f"🚨 固定止损触发: ${current_price:.2f} <= ${position['stop_loss']:.2f}")
-            elif current_price >= position['take_profit']:
-                final_action = StopActionType.TAKE_PROFIT
-                final_decision = 'execute'
-                reasoning_parts.append(f"🎯 固定止盈触发: ${current_price:.2f} >= ${position['take_profit']:.2f}")
-        else:  # short
-            if current_price >= position['stop_loss']:
-                final_action = StopActionType.STOP_LOSS
-                final_decision = 'execute'
-                reasoning_parts.append(f"🚨 固定止损触发: ${current_price:.2f} >= ${position['stop_loss']:.2f}")
-            elif current_price <= position['take_profit']:
-                final_action = StopActionType.TAKE_PROFIT
-                final_decision = 'execute'
-                reasoning_parts.append(f"🎯 固定止盈触发: ${current_price:.2f} <= ${position['take_profit']:.2f}")
-        
-        # 检查移动止损
-        trailing_stop = self.stop_strategy.calculate_trailing_stop(
-            position['action'],
-            position['entry_price'],
-            current_price,
-            position['highest_price'],
-            position['lowest_price']
-        )
-        
-        if position['action'] == 'buy' and current_price <= trailing_stop:
-            final_action = StopActionType.TRAILING_STOP
-            final_decision = 'execute'
-            reasoning_parts.append(f"📍 移动止损触发: ${current_price:.2f} <= ${trailing_stop:.2f}")
-        elif position['action'] == 'short' and current_price >= trailing_stop:
-            final_action = StopActionType.TRAILING_STOP
-            final_decision = 'execute'
-            reasoning_parts.append(f"📍 移动止损触发: ${current_price:.2f} >= ${trailing_stop:.2f}")
-        
-        # 4. 如果决定执行但没有reasoning，添加默认说明
+        # 3. 如果没有reasoning，添加默认说明
         if not reasoning_parts:
             if final_decision == 'execute':
                 reasoning_parts.append(f"执行{final_action.value}操作")
             else:
                 reasoning_parts.append(f"继续持仓，团队建议继续观察")
         
-        # 构建详细的决策报告
         team_votes_summary = ", ".join([
             f"{action.value}({count}票)" 
             for action, count in vote_counts.items() if count > 0
@@ -417,11 +540,12 @@ class StopLossDecisionSystem:
             'reasoning': reasoning,
             'suggested_stop_loss': position['stop_loss'],
             'suggested_take_profit': position['take_profit'],
-            'trailing_stop': trailing_stop,
+            'trailing_stop': trailing_stop if 'trailing_stop' in locals() else 0,
             'team_votes': vote_counts,
             'urgency': avg_urgency,
             'position_pnl': position.get('pnl', 0),
-            'position_pnl_pct': position.get('pnl_pct', 0)
+            'position_pnl_pct': position.get('pnl_pct', 0),
+            'ai_final_reasoning': '使用规则决策系统'
         }
     
     def remove_position(self, position_id: str):

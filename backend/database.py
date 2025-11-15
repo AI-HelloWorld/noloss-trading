@@ -75,6 +75,13 @@ class Trade(Base):
     order_id = Column(String(100))
     profit_loss = Column(Float, nullable=True)
     profit_loss_percentage = Column(Float, nullable=True)  # 盈亏百分比
+    executed_at = Column(DateTime, nullable=True)  # 交易执行时间
+    is_profitable = Column(Boolean, nullable=True)  # 是否盈利（仅平仓操作有效）
+    entry_price = Column(Float, nullable=True)  # 入场价格（仅平仓操作记录）
+    stop_loss = Column(Float, nullable=True)  # 止损价格
+    take_profit = Column(Float, nullable=True)  # 止盈价格
+    stop_loss_strategy = Column(String(50), nullable=True)  # 止损策略类型
+    take_profit_strategy = Column(String(50), nullable=True)  # 止盈策略类型
 
 
 class PortfolioSnapshot(Base):
@@ -105,6 +112,12 @@ class Position(Base):
     unrealized_pnl = Column(Float)
     position_type = Column(String(10))  # long, short
     last_updated = Column(DateTime, default=get_local_time)
+    entry_price = Column(Float, nullable=True)  # 入场价格（记录开仓时的价格）
+    stop_loss = Column(Float, nullable=True)  # 止损价格
+    take_profit = Column(Float, nullable=True)  # 止盈价格
+    stop_loss_strategy = Column(String(50), nullable=True)  # 止损策略类型
+    take_profit_strategy = Column(String(50), nullable=True)  # 止盈策略类型
+    executed_at = Column(DateTime, nullable=True)  # 持仓创建时间
 
 
 class AIDecision(Base):
@@ -156,7 +169,8 @@ class News(Base):
 # 创建异步引擎
 engine = create_async_engine(
     settings.database_url,
-    echo=settings.debug_mode,
+    echo=settings.sql_echo,  # 使用专门的SQL日志配置
+    pool_pre_ping=True,  # 连接池健康检查
 )
 
 AsyncSessionLocal = sessionmaker(

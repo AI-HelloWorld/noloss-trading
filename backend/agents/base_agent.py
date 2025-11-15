@@ -49,7 +49,17 @@ class BaseAgent(ABC):
             AgentRole.PORTFOLIO_MANAGER: "投资组合经理"
         }
         return role_names.get(self.role, "未知角色")
-    
+    def _get_target_role_name(self,role: AgentRole) -> str:
+        """获取角色名称"""
+        role_names = {
+            AgentRole.FUNDAMENTAL_ANALYST: "基本面分析师",
+            AgentRole.SENTIMENT_ANALYST: "情绪分析师",
+            AgentRole.NEWS_ANALYST: "新闻分析师",
+            AgentRole.TECHNICAL_ANALYST: "技术分析师",
+            AgentRole.RISK_MANAGER: "风险管理经理",
+            AgentRole.PORTFOLIO_MANAGER: "投资组合经理"
+        }
+        return role_names.get(role, "未知角色")
     @abstractmethod
     async def analyze(
         self,

@@ -1,6 +1,7 @@
 """
 情绪分析师智能体
 """
+import datetime
 import json
 import re
 from typing import Dict, Optional
@@ -41,7 +42,50 @@ class SentimentAnalyst(BaseAgent):
         try:
             # 获取情绪数据（这里可以集成真实的社交媒体API）
             sentiment_data = additional_data.get('sentiment', {}) if additional_data else {}
+            news_data = additional_data.get('news', []) if additional_data else []
+            processed_news = []
+            for item in news_data:
+                if item.get("sentiment_score") == 0.5:
+                    continue
+                news_time = item.get("received_at")
+                # 超过一小时 过滤
+                if news_time:
+                    try:
+                        # 尝试解析ISO格式时间（支持多种格式）
+                        if isinstance(news_time, str):
+                            # 去掉微秒部分，统一处理
+                            if 'T' in news_time:
+                                # ISO格式: 2025-11-03T12:31:23.153883
+                                news_time = news_time.split('.')[0]  # 去掉微秒
+                                news_datetime = datetime.datetime.strptime(news_time, "%Y-%m-%dT%H:%M:%S")
+                            else:
+                                # 标准格式: 2025-11-03 12:31:23
+                                news_datetime = datetime.datetime.strptime(news_time, "%Y-%m-%d %H:%M:%S")
+                            
+                            # 检查是否超过1小时
+                            if datetime.datetime.now() - news_datetime > datetime.timedelta(hours=1):
+                                continue
+                    except Exception as e:
+                        logger.warning(f"解析新闻时间失败: {news_time}, 错误: {e}")
+                        # 时间解析失败，保留该新闻
+                        pass
+                
+                    processed_item = {
+                        "id": item.get("id", ""),
+                        "summary": item.get("summary", ""),
+                        "sentiment": item.get("sentiment", "neutral"),
+                        "sentiment_score": item.get("sentiment_score", 0.5),
+                        "mentioned_coins": item.get("mentioned_coins", []),
+                        "is_major": item.get("is_major", False),
+                        "received_at": item.get("received_at", ""),
+                        "source_url": item.get("source_url", "")
+                    }
+                    # 如果是重大新闻，包含原文内容
+                    if item.get("is_major") and item.get("original_content"):
+                        processed_item["original_content"] = item.get("original_content")
+                    processed_news.append(processed_item.get("summary"))
             
+            news_json = json.dumps(processed_news, ensure_ascii=False, indent=2) if processed_news else "无"
             # 新增：计算恐惧贪婪指数
             fear_greed_index = self._calculate_fear_greed_index(sentiment_data, market_data)
             
@@ -49,14 +93,16 @@ class SentimentAnalyst(BaseAgent):
             sentiment_extremity = self._assess_sentiment_extremity(sentiment_data, fear_greed_index)
             
             # 构建分析上下文（注入风控配置）
-            analysis_context = f"""
+            analysis_context = f"""当前交易对：{symbol}
 {get_risk_control_context()}
 
-当前交易对：{symbol}
+60分钟新闻数据：
+{news_json}
+
 市场数据：{json.dumps(market_data, ensure_ascii=False, indent=2)}
 
 情绪数据：
-{json.dumps(sentiment_data, ensure_ascii=False, indent=2)}
+{json.dumps(sentiment_data, ensure_ascii=False, indent=2) if sentiment_data else "无情绪数据"}
 
 情绪极端程度: {sentiment_extremity}
 恐惧贪婪指数: {fear_greed_index} (0-100, <20极度恐惧, >80极度贪婪)
@@ -71,7 +117,7 @@ class SentimentAnalyst(BaseAgent):
 """
             
             prompt = analysis_context
-            
+            logger.info(f"情绪分析提示词:{SENTIMENT_ANALYST_PROMPT}\n {prompt}")
             async with aiohttp.ClientSession() as session:
                 headers = {
                     "Authorization": f"Bearer {self.api_key}",
@@ -84,7 +130,7 @@ class SentimentAnalyst(BaseAgent):
                         {"role": "system", "content": SENTIMENT_ANALYST_PROMPT},
                         {"role": "user", "content": prompt}
                     ],
-                    "temperature": 0.7,
+                    "temperature": 0.9,
                     "max_tokens": 1000
                 }
                 

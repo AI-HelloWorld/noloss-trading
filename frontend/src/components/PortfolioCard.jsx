@@ -43,11 +43,11 @@ const PortfolioCard = ({ portfolioData }) => {
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-      {/* 总盈亏 - 基于起始资金175计算 */}
-      <div className={`card border-2 hover:shadow-2xl transform hover:scale-105 transition-all duration-300 ${
+      {/* 总盈亏 -(Portfolio Card) 基于起始资金175计算 */}
+      <div className={`card border-2 hover:shadow-2xl transform hover:scale-[1.02] transition-all duration-300 relative overflow-hidden ${
         calculated_pnl >= 0 
-          ? 'bg-gradient-to-br from-success/20 via-success/10 to-dark-50 border-success/50 hover:border-success hover:shadow-success/30' 
-          : 'bg-gradient-to-br from-danger/20 via-danger/10 to-dark-50 border-danger/50 hover:border-danger hover:shadow-danger/30'
+          ? 'bg-gradient-to-br from-success/25 via-success/15 to-dark-50/90 border-success/60 hover:border-success hover:shadow-success/40' 
+          : 'bg-gradient-to-br from-danger/25 via-danger/15 to-dark-50/90 border-danger/60 hover:border-danger hover:shadow-danger/40'
       }`}>
         <div className="flex items-center justify-between">
           <div>
@@ -71,17 +71,18 @@ const PortfolioCard = ({ portfolioData }) => {
       </div>
 
       {/* 钱包余额 */}
-      <div className="card bg-gradient-to-br from-dark-100 via-dark-50 to-dark-100 border-2 border-dark-200 hover:border-gold-400/50 hover:shadow-2xl hover:shadow-gold-400/20 transform hover:scale-105 transition-all duration-300">
-        <div className="flex items-center justify-between">
+      <div className="card bg-gradient-to-br from-dark-100 via-dark-50 to-dark-100 border-2 border-gold-400/30 hover:border-gold-400/60 hover:shadow-2xl hover:shadow-gold-400/30 transform hover:scale-[1.02] transition-all duration-300 relative overflow-hidden group">
+        <div className="absolute top-0 right-0 w-32 h-32 bg-gold-400/5 rounded-full blur-3xl group-hover:bg-gold-400/10 transition-all"></div>
+        <div className="flex items-center justify-between relative z-10">
           <div>
-            <p className="text-base text-white font-bold mb-1 flex items-center gap-2">
+            <p className="text-base text-dark-700 font-bold mb-1 flex items-center gap-2">
               {t('portfolio.walletBalance')}
-              <span className="text-xs bg-gold-400 text-dark-900 px-2 py-1 rounded-full font-bold animate-pulse">实时钱包</span>
+              <span className="text-xs bg-gradient-to-r from-gold-400 to-gold-500 text-dark-50 px-2.5 py-1 rounded-full font-bold animate-pulse shadow-lg">实时钱包</span>
             </p>
-            <h2 className="text-5xl font-display font-black mt-1 text-white tracking-tight">${cash_balance?.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</h2>
-            <p className="text-base mt-2 text-gold-400 font-bold">{t('portfolio.positions')}: ${positions_value?.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+            <h2 className="text-5xl font-display font-black mt-1 text-dark-700 tracking-tight drop-shadow-sm">${cash_balance?.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</h2>
+            <p className="text-base mt-2 text-gold-500 font-bold">{t('portfolio.positions')}: ${positions_value?.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
           </div>
-          <Activity className="w-16 h-16 text-gold-400" strokeWidth={2} />
+          <Activity className="w-16 h-16 text-gold-400 drop-shadow-[0_0_12px_rgba(252,213,53,0.4)]" strokeWidth={2} />
         </div>
       </div>
 

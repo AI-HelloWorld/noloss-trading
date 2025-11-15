@@ -31,10 +31,11 @@ class Settings(BaseSettings):
     app_host: str = os.getenv("APP_HOST", "0.0.0.0")
     app_port: int = int(os.getenv("APP_PORT", "8000"))
     debug_mode: bool = os.getenv("DEBUG_MODE", "False").lower() == "true"
+    sql_echo: bool = os.getenv("SQL_ECHO", "True").lower() == "true"  # 是否打印SQL语句
     
     # 交易配置
-    initial_balance: float = float(os.getenv("INITIAL_BALANCE", "100.0"))
-    max_position_size: float = float(os.getenv("MAX_POSITION_SIZE", "0.1"))
+    initial_balance: float = float(os.getenv("INITIAL_BALANCE", "100"))
+    max_position_size: float = float(os.getenv("MAX_POSITION_SIZE", "0.2"))
     risk_per_trade: float = float(os.getenv("RISK_PER_TRADE", "0.02"))
     enable_auto_trading: bool = os.getenv("ENABLE_AUTO_TRADING", "True").lower() == "true"
     
@@ -42,9 +43,13 @@ class Settings(BaseSettings):
     max_wallet_usage: float = float(os.getenv("MAX_WALLET_USAGE", "0.5"))  # 单笔最多用50%钱包余额
     margin_reserve_ratio: float = float(os.getenv("MARGIN_RESERVE_RATIO", "0.3"))  # 合约交易保证金预留比例
     
+    # 交易对筛选配置
+    min_volume_threshold: float = float(os.getenv("MIN_VOLUME_THRESHOLD", "20000000"))  # 最小24H交易量（美元），默认2000万
+    max_trading_symbols: int = int(os.getenv("MAX_TRADING_SYMBOLS", "50"))  # 最多选择多少个交易对进行分析，默认50个
+    
     # 更新频率（秒）- 超实时模式
-    data_update_interval: int = int(os.getenv("DATA_UPDATE_INTERVAL", "3"))  # 市场数据每3秒更新（超实时）
-    trade_check_interval: int = int(os.getenv("TRADE_CHECK_INTERVAL", "60"))  # 交易检查每1分钟
+    data_update_interval: int = int(os.getenv("DATA_UPDATE_INTERVAL", "60"))  # 市场数据每3秒更新（超实时）
+    trade_check_interval: int = int(os.getenv("TRADE_CHECK_INTERVAL", "600"))  # 交易检查每5分钟
     broadcast_interval: int = int(os.getenv("BROADCAST_INTERVAL", "2"))  # WebSocket推送每2秒
     
     # 新闻API配置

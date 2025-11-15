@@ -19,6 +19,7 @@ from backend.trading.trading_engine import trading_engine
 from backend.agents.agent_team import agent_team
 from backend.exchanges.aster_dex import aster_client
 from backend.locales.manager import get_message, get_supported_languages
+from backend.migrations import run_all_migrations
 
 # ==================== 🚨 重构模式：停止所有交易逻辑 ====================
 REFACTORING_MODE = False  # 设置为True时，停止所有交易和后台任务
@@ -61,7 +62,11 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("🚀 启动AI交易平台...")
     
+    # 初始化数据库
     await init_db()
+    
+    # 执行数据库迁移
+    await run_all_migrations()
     
     async for db in get_db():
         await trading_engine.initialize(db)
@@ -70,6 +75,7 @@ async def lifespan(app: FastAPI):
     # 启动后台任务（重构模式下跳过）
     if not REFACTORING_MODE:
         asyncio.create_task(update_market_data_task())  # 市场数据更新任务
+        asyncio.create_task(background_trading_task_only_buy())  # 交易任务
         asyncio.create_task(background_trading_task())  # 交易任务
         asyncio.create_task(broadcast_updates_task())   # 广播任务
         logger.info("✅ 所有后台任务已启动")
@@ -374,8 +380,16 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
                 "amount": pos['amount'],
                 "current_price": pos['current_price'],
                 "average_price": pos['average_price'],
+                "entry_price": pos.get('entry_price', pos['average_price']),  # 添加入场价格
                 "unrealized_pnl": pos['unrealized_pnl'],
-                "value_usd": position_value
+                "value_usd": position_value,
+                "stop_loss": pos.get('stop_loss', 0),
+                "take_profit": pos.get('take_profit', 0),
+                "executed_at": pos.get('executed_at', datetime.now()),
+                "position_type": pos.get('position_type', 'long'),
+                "stop_loss_strategy": pos.get('stop_loss_strategy', 'default'),
+                "take_profit_strategy": pos.get('take_profit_strategy', 'default'),
+                "stop_loss_strategy": pos.get('stop_loss_strategy', 'default'),
             })
     
     logger.debug(f"📊 返回{len(positions)}个持仓，总价值=${sum(p['value_usd'] for p in positions):.2f}")
@@ -454,21 +468,69 @@ async def background_trading_task():
     
     logger.info("🤖 后台交易任务已启动（快速模式）")
     
+    def _next_aligned_time(reference: datetime) -> datetime:
+        aligned = reference.replace(second=0, microsecond=0)
+        remainder = aligned.minute % 30
+        if remainder == 0 and reference.second == 0 and reference.microsecond == 0:
+            return aligned
+        increment = 30 - remainder if remainder != 0 else 30
+        return aligned + timedelta(minutes=increment)
+
+    next_run = _next_aligned_time(datetime.now())
+    logger.info(f"⏰ 后台交易任务将于 {next_run.strftime('%Y-%m-%d %H:%M:%S')} 首次执行，并按整十分钟对齐运行")
+
     while True:
         try:
+            now = datetime.now()
+            wait_seconds = (next_run - now).total_seconds()
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+            else:
+                logger.debug("已错过计划执行时间，立即执行补偿任务")
+
+            cycle_start = datetime.now()
+            
             if settings.enable_auto_trading:
                 async for db in get_db():
                     await trading_engine.execute_trading_cycle(db)
                     break
-            
-            # 使用配置的交易检查间隔（默认60秒，更频繁）
-            await asyncio.sleep(settings.trade_check_interval)
+            else:
+                logger.debug("自动交易已禁用，跳过本轮执行")
+
+            finished_at = datetime.now()
+            duration = finished_at - cycle_start
+            next_run = _next_aligned_time(finished_at + timedelta(seconds=1))
+            logger.debug(
+                f"本轮任务耗时 {duration.total_seconds():.2f} 秒，下一次后台交易任务将在 {next_run.strftime('%Y-%m-%d %H:%M:%S')} 执行"
+            )
             
         except Exception as e:
             logger.error(f"后台交易任务错误: {e}")
-            await asyncio.sleep(60)
+            next_run = _next_aligned_time(datetime.now())
+            await asyncio.sleep(300)
 
-
+async def background_trading_task_only_buy():
+    """后台交易任务（快速响应）"""
+    # 重构模式：停止所有交易
+    if REFACTORING_MODE:
+        logger.info("⚠️  后台交易任务已跳过（重构模式）")
+        return
+    
+    logger.info("🤖 后台交易任务已启动（快速模式）")
+    
+    while True:
+        try:
+            if settings.enable_auto_trading:
+                async for db in get_db():
+                    await trading_engine.execute_trading_cycle(db=db,only_buy=True)
+                    break
+            
+            # 使用配置的交易检查间隔（默认60秒，更频繁）
+            await asyncio.sleep(120)
+            
+        except Exception as e:
+            logger.error(f"后台交易任务错误: {e}")
+            await asyncio.sleep(300)
 async def broadcast_updates_task():
     """广播更新任务（实时SDK钱包余额）"""
     # 重构模式：停止WebSocket广播（前端仍可通过API查询）
@@ -522,7 +584,7 @@ async def broadcast_updates_task():
                     "balance_source": "SDK"  # 明确标记余额来源
                 })
                 
-                logger.info(f"💰 广播SDK钱包余额: 总资产=${portfolio.get('total_balance', 0):.2f}, 钱包=${portfolio.get('cash_balance', 0):.2f}, 交易记录数={len(trades_list)}")
+                # logger.info(f"💰 广播SDK钱包余额: 总资产=${portfolio.get('total_balance', 0):.2f}, 钱包=${portfolio.get('cash_balance', 0):.2f}, 交易记录数={len(trades_list)}")
                 break
             
             await asyncio.sleep(settings.broadcast_interval)
